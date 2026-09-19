@@ -1,0 +1,33 @@
+{
+ "name": "pika",
+ "output": "/home/node/.openclaw/workspace/Pikadoku-v2.0.html",
+ "strings": {
+  "page_title": "Pikadoku 寶讀 — 寶可夢解謎",
+  "game_title": "Pikadoku 寶讀",
+  "menu_sub": "數獨邏輯 × 踩地雷 × 收集養成 · 4×4 ~ 14×14 · v2.1",
+  "dex_title": "寶可夢圖鑑",
+  "legend_name": "傳說·神話",
+  "tab_gen": "初代 151",
+  "mon": "寶可夢",
+  "ball_name": "精靈球",
+  "buddy_mon": "皮卡丘",
+  "RARITY_NAMES": "['常見','稀有','遠古','神話']",
+  "RARITY_BADGE": "['🟢','🔵','🟣','🟠']"
+ },
+ "ls": {
+  "dex": "meowdoku-dex",
+  "sound": "meowdoku-sound",
+  "lv": "pikadoku-lv",
+  "lock": "pikadoku-lock",
+  "econ": "pikadoku-econ",
+  "skills": "pikadoku-skills",
+  "buddy": "pikadoku-buddy",
+  "friend": "pikadoku-friend",
+  "friend2": "pikadoku-friend2",
+  "story": "pikadoku-story"
+ },
+ "ball_svg": "<svg width=\"15\" height=\"15\" viewBox=\"0 0 32 32\" style=\"vertical-align:-2px\"><circle cx=\"16\" cy=\"16\" r=\"14\" fill=\"#fff\" stroke=\"#222\" stroke-width=\"2.5\"/><path d=\"M2 16 a14 14 0 0 1 28 0\" fill=\"#eb3d3d\" stroke=\"#222\" stroke-width=\"2.5\"/><rect x=\"1\" y=\"13.5\" width=\"30\" height=\"5\" fill=\"#222\"/><circle cx=\"16\" cy=\"16\" r=\"5.5\" fill=\"#fff\" stroke=\"#222\" stroke-width=\"2.5\"/><circle cx=\"16\" cy=\"16\" r=\"2.4\" fill=\"#e8e8e8\" stroke=\"#888\" stroke-width=\"1\"/></svg>",
+ "theme_css": "",
+ "story_file": "story-pika.js",
+ "data": "pika"
+}

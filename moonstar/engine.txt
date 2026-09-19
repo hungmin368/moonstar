@@ -1,0 +1,2038 @@
+/* ---------- 配色 ---------- */
+function hexHue(hex){
+  const r=parseInt(hex.slice(1,3),16)/255, g=parseInt(hex.slice(3,5),16)/255, b=parseInt(hex.slice(5,7),16)/255;
+  const mx=Math.max(r,g,b), mn=Math.min(r,g,b); if(mx===mn) return 0;
+  const d=mx-mn;
+  let h;
+  if(mx===r) h=((g-b)/d)%6; else if(mx===g) h=(b-r)/d+2; else h=(r-g)/d+4;
+  h*=60; if(h<0)h+=360; return h;
+}
+function hueDist(a,b){ const d=Math.abs(a-b)%360; return Math.min(d,360-d); }
+function relL(hex){
+  const r=parseInt(hex.slice(1,3),16)/255, g=parseInt(hex.slice(3,5),16)/255, b=parseInt(hex.slice(5,7),16)/255;
+  return (Math.max(r,g,b)+Math.min(r,g,b))/2*100;
+}
+function hslToHex(h,s,l){
+  s/=100; l/=100;
+  const k=n=>(n+h/30)%12, a=s*Math.min(l,1-l);
+  const f=n=>l-a*Math.max(-1,Math.min(k(n)-3,Math.min(9-k(n),1)));
+  const to=x=>Math.round(x*255).toString(16).padStart(2,'0');
+  return '#'+to(f(0))+to(f(8))+to(f(4));
+}
+function buildPalette(N){ /* 10×10 起動態均分色相 + 交替明度 */
+  if(N<=9) return PALETTE;
+  const M=N+4, out=[];
+  for(let i=0;i<M;i++) out.push(hslToHex(i*360/M, 62, i%2?79:66));
+  return out;
+}
+function assignRegionColors(N, regionOf, PAL){ /* 鄰接區塊自動拉開色相（10+ 併用明度差） */
+  const adj=Array.from({length:N},()=>new Set());
+  for(let i=0;i<N*N;i++){
+    const r=Math.floor(i/N), c=i%N, rg=regionOf[i];
+    if(c<N-1){ const o=regionOf[i+1]; if(o!==rg){ adj[rg].add(o); adj[o].add(rg); } }
+    if(r<N-1){ const o=regionOf[i+N]; if(o!==rg){ adj[rg].add(o); adj[o].add(rg); } }
+  }
+  PAL = PAL || PALETTE;
+  const info=PAL.map(hex=>({hex, hue:hexHue(hex), L:relL(hex)}));
+  const useL = N>=10;
+  const colorOf=new Array(N).fill(-1);
+  const order=[...Array(N).keys()].sort((a,b)=>adj[b].size-adj[a].size);
+  for(const rg of order){
+    let best=-1, bestScore=-1;
+    for(let p=0;p<PAL.length;p++){
+      if(colorOf.includes(p)) continue;
+      let score=999;
+      for(const nb of adj[rg]){
+        if(colorOf[nb]>=0){
+          const dL=Math.abs(info[p].L-info[colorOf[nb]].L);
+          const s=hueDist(info[p].hue,info[colorOf[nb]].hue)+((useL&&dL>=8)?22:0);
+          score=Math.min(score,s);
+        }
+      }
+      if(score>bestScore){ bestScore=score; best=p; }
+    }
+    colorOf[rg]=best;
+  }
+  return colorOf.map(p=>info[p].hex);
+}
+
+/* ---------- 音效 ---------- */
+let AC = null;
+let soundOn = LS.get(@@LS_sound@@) !== '0';
+function ac(){ if(!AC){ try{ AC = new (window.AudioContext||window.webkitAudioContext)(); }catch(e){} } if(AC && AC.state==='suspended') AC.resume(); return AC; }
+function tone(freq, delay, dur, type, vol, slideTo){
+  if(!soundOn) return; const c = ac(); if(!c) return;
+  const t0 = c.currentTime + delay;
+  const o = c.createOscillator(), g = c.createGain();
+  o.type = type || 'sine';
+  o.frequency.setValueAtTime(freq, t0);
+  if(slideTo) o.frequency.exponentialRampToValueAtTime(slideTo, t0 + dur);
+  g.gain.setValueAtTime(0.0001, t0);
+  g.gain.exponentialRampToValueAtTime(vol || 0.15, t0 + 0.02);
+  g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+  o.connect(g); g.connect(c.destination);
+  o.start(t0); o.stop(t0 + dur + 0.05);
+}
+const SFX = {
+  tap:   ()=>tone(720,0,.05,'triangle',.07),
+  untap: ()=>tone(480,0,.05,'triangle',.05),
+  cat:   ()=>{ tone(700,0,.1,'sine',.18); tone(940,.09,.16,'sine',.18); },
+  wrong: ()=>tone(190,0,.22,'sawtooth',.1,120),
+  miss:  ()=>tone(330,0,.28,'sine',.16,150),
+  hint:  ()=>{ tone(520,0,.06,'triangle',.1,700); tone(650,.09,.06,'triangle',.1,860); },
+  ball:  ()=>tone(300,0,.12,'sine',.12,900),
+  catchp:()=>{ tone(523,0,.09,'triangle',.16); tone(659,.09,.09,'triangle',.16); tone(784,.18,.2,'triangle',.16); },
+  win:   ()=>[523,659,784,1046].forEach((f,i)=>tone(f,i*.12,.2,'triangle',.14)),
+  fail:  ()=>[392,330,262,196].forEach((f,i)=>tone(f,i*.16,.24,'sine',.14)),
+  tick:  ()=>tone(880,0,.04,'square',.05),
+  bonus: ()=>{ tone(660,0,.08,'triangle',.12); tone(880,.08,.12,'triangle',.12); },
+  discover:()=>{ tone(659,0,.12,'triangle',.15); tone(880,.1,.12,'triangle',.15); tone(1318,.2,.32,'sine',.16); },
+};
+
+/* ---------- 盤面生成 ---------- */
+function shuffle(a){ for(let i=a.length-1;i>0;i--){ const j=Math.floor(Math.random()*(i+1)); [a[i],a[j]]=[a[j],a[i]]; } return a; }
+function neighbors4(i,N){ const r=Math.floor(i/N), c=i%N, out=[]; if(r>0)out.push(i-N); if(r<N-1)out.push(i+N); if(c>0)out.push(i-1); if(c<N-1)out.push(i+1); return out; }
+
+function randomRegions(N){ /* 隨機連通區塊分割，每區至少2格 */
+  const total=N*N;
+  for(let t=0;t<200;t++){
+    const regionOf=new Array(total).fill(-1);
+    const seeds=shuffle([...Array(total).keys()]).slice(0,N);
+    const frontiers=seeds.map(()=>[]);
+    seeds.forEach((s,i)=>{ regionOf[s]=i; neighbors4(s,N).forEach(nb=>frontiers[i].push(nb)); });
+    let assigned=N;
+    while(assigned<total){
+      let progressed=false;
+      for(const r of shuffle([...Array(N).keys()])){
+        if(assigned>=total) break;
+        let cell=null;
+        while(frontiers[r].length){
+          const pick=Math.floor(Math.random()*frontiers[r].length);
+          const c=frontiers[r][pick];
+          frontiers[r].splice(pick,1);
+          if(regionOf[c]!==-1) continue;
+          cell=c; break;
+        }
+        if(cell===null) continue;
+        regionOf[cell]=r; assigned++; progressed=true;
+        neighbors4(cell,N).forEach(nb=>{ if(regionOf[nb]===-1) frontiers[r].push(nb); });
+      }
+      if(!progressed) break;
+    }
+    if(assigned<total) continue;
+    const sizes=new Array(N).fill(0);
+    regionOf.forEach(r=>sizes[r]++);
+    if(sizes.some(s=>s<2)) continue;
+    return regionOf;
+  }
+  return null;
+}
+
+function solve2(N, regionOf, nodeLimit, K){ /* v2.0.3：位元遮罩＋節點熔斷＋K 解上限 */
+  const sols=[];
+  const cur=new Uint8Array(N);
+  let usedColMask=0, usedRegMask=0, nodes=0, aborted=false;
+  const LIMIT = nodeLimit||Infinity;
+  const MAXK = K||2;
+  (function bt(r, prevCol){
+    if(++nodes>LIMIT){ aborted=true; return; }
+    if(sols.length>=MAXK) return;
+    if(r===N){ sols.push(Array.from(cur)); return; }
+    for(let c=0;c<N;c++){
+      if(usedColMask>>c&1) continue;
+      if(prevCol>=0 && Math.abs(c-prevCol)<=1) continue;
+      const reg=regionOf[r*N+c];
+      if(usedRegMask>>reg&1) continue;
+      usedColMask|=1<<c; usedRegMask|=1<<reg; cur[r]=c;
+      bt(r+1,c);
+      usedColMask&=~(1<<c); usedRegMask&=~(1<<reg);
+      if(sols.length>=2||aborted) return;
+    }
+  })(0,-1);
+  return aborted ? null : sols;
+}
+
+function connectedAfterRemoval(N, regionOf, region, cellIdx){
+  const cells=[];
+  for(let i=0;i<N*N;i++) if(regionOf[i]===region && i!==cellIdx) cells.push(i);
+  if(cells.length<2) return false;
+  const seen=new Set([cells[0]]), st=[cells[0]];
+  while(st.length){ const cur=st.pop(); for(const nb of neighbors4(cur,N)){ if(regionOf[nb]===region && nb!==cellIdx && !seen.has(nb)){ seen.add(nb); st.push(nb); } } }
+  return seen.size===cells.length;
+}
+
+function generatePuzzle(N, deadline){ /* v1.1：定向獵殺 + 0解回退 + 硬限時 */
+  deadline = deadline || 1200;
+  const t0=Date.now();
+  for(let restart=0;restart<400;restart++){
+    if(Date.now()-t0>deadline) return null;
+    const regionOf=randomRegions(N);
+    if(!regionOf) continue;
+    const nl = N>=14 ? 50000 : Infinity; /* 大盤節點熔斷 */
+    let sols=solve2(N,regionOf,nl);
+    if(sols===null){ continue; } /* 太慢：棄盤重來 */
+    if(sols.length===0) continue;
+    let zeroStreak=0;
+    for(let iter=0;iter<800;iter++){
+      if(iter%10===0 && Date.now()-t0>deadline) return null;
+      if(sols.length===1 || (N>=16 && sols.length>=1)){
+        /* N>=16：少解盤（1-4 解），貓取主解，全部解帶回 */
+        let allSols=null;
+        if(N>=16 && sols.length>1){
+          const full=solve2(N, regionOf, 500000, 5);
+          if(full && full.length>=1 && full.length<=4) allSols=full;
+          else if(full && full.length===1){ sols=[full[0]]; }
+          else { continue; }
+        }
+        const cats=new Set();
+        for(let r=0;r<N;r++) cats.add(r*N+sols[0][r]);
+        return {cats, regionOf, allSols};
+      }
+      const A=sols[0], B=sols[1];
+      const S_B=[]; for(let r=0;r<N;r++) S_B.push(r*N+B[r]);
+      const diffCells=[];
+      for(let r=0;r<N;r++) if(A[r]!==B[r]) diffCells.push(r*N+B[r]);
+      shuffle(diffCells);
+      const killMoves=[], normMoves=[];
+      for(const X of diffCells){
+        const R=regionOf[X];
+        if(!connectedAfterRemoval(N,regionOf,R,X)) continue;
+        const nbs=neighbors4(X,N).filter(nb=>regionOf[nb]!==R);
+        if(!nbs.length) continue;
+        let kill=false;
+        for(const nb of nbs){
+          const rr=regionOf[nb];
+          if(S_B.some(s=>s!==X && regionOf[s]===rr)){ kill=true; break; }
+        }
+        (kill?killMoves:normMoves).push(X);
+      }
+      const cand=killMoves.length?killMoves:normMoves;
+      if(!cand.length) break;
+      const X=cand[0];
+      const R=regionOf[X];
+      const nbs=neighbors4(X,N).filter(nb=>regionOf[nb]!==R);
+      regionOf[X]=regionOf[nbs[Math.floor(Math.random()*nbs.length)]];
+      const ns=solve2(N,regionOf,nl);
+      if(ns===null){ regionOf[X]=R; break; } /* 太慢：棄盤 */
+      if(ns.length===0){
+        regionOf[X]=R; zeroStreak++;
+        if(zeroStreak>25) break;
+        continue;
+      }
+      zeroStreak=0; sols=ns;
+    }
+  }
+  return null;
+}
+
+/* ---------- 預生成棋盤池（10~14 即開即玩） ---------- */
+const POOL_DATA = /*__POOL_DATA__*/ {};
+const POOL_SIZES = [10,11,12,13,14];
+const livePool = {};
+function poolInit(){
+  POOL_SIZES.forEach(n=>{
+    const arr = POOL_DATA[String(n)]||[];
+    livePool[n] = arr.map(s=>s.split(',').map(Number));
+  });
+}
+function transformBoard(N, regionOf){ /* 隨機旋轉/鏡像 ×8 */
+  const T=Math.floor(Math.random()*8), ro=new Array(N*N);
+  for(let r=0;r<N;r++)for(let c=0;c<N;c++){
+    let r2=r,c2=c;
+    if(T&1){ const t=r2; r2=c2; c2=t; }
+    if(T&2){ r2=N-1-r2; }
+    if(T&4){ c2=N-1-c2; }
+    ro[r2*N+c2]=regionOf[r*N+c];
+  }
+  return ro;
+}
+function poolTake(n){
+  if(!livePool[n] || !livePool[n].length) return null;
+  const idx=Math.floor(Math.random()*livePool[n].length);
+  const ro=livePool[n].splice(idx,1)[0];
+  return transformBoard(n, ro);
+}
+let poolBusy=false;
+function poolRefill(){ /* 只在閒置時補貨，不搶遊戲時間 */
+  if(poolBusy) return;
+  if(G && !G.tutorial && G.state==='marking' && !document.querySelector('.overlay.show')) return;
+  const need=POOL_SIZES.filter(n=>(livePool[n]||[]).length<6);
+  if(!need.length) return;
+  poolBusy=true;
+  setTimeout(()=>{
+    const n=need[Math.floor(Math.random()*need.length)];
+    const pz=generatePuzzle(n, n>=13?3000:1400);
+    if(pz) livePool[n].push(Array.from(pz.regionOf));
+    poolBusy=false;
+  }, 30);
+}
+
+/* ---------- LV 戰績（個人分數） ---------- */
+let LV = {};
+try{ LV = JSON.parse(LS.get(@@LS_lv@@)||'{}')||{}; }catch(e){ LV={}; }
+function lvRec(n){ return LV[String(n)]||{best:0,total:0}; }
+function lvTotal(){ let t=0; Object.keys(LV).forEach(k=>{ t+=LV[k].total||0; }); return t; }
+function lvSave(){ LS.set(@@LS_lv@@, JSON.stringify(LV)); }
+function fmtSec(s){
+  s=Math.max(0, Math.floor(s));
+  if(s>=3600){ const h=Math.floor(s/3600), m=Math.floor(s%3600/60), ss=s%60; return h+':'+String(m).padStart(2,'0')+':'+String(ss).padStart(2,'0'); }
+  return Math.floor(s/60)+':'+String(s%60).padStart(2,'0');
+}
+function renderLV(){
+  const el=$('lv-rows2')||$('lv-rows'); if(!el) return;
+  el.innerHTML='';
+  for(let n=6;n<=14;n++){
+    const r=lvRec(n);
+    const d=document.createElement('div');
+    d.className='lvrow'+((G&&G.N===n&&!G.tutorial)?' cur':'');
+    d.innerHTML='<b>LV'+n+'</b><span><span class="lvv">'+(r.best?r.best:'—')+'</span><span class="lvt">'+(r.total?'Σ'+r.total:'')+'</span></span>';
+    el.appendChild(d);
+  }
+}
+
+/* ---------- 經濟系統：星願種子／獎勵券 ---------- */
+let ECON = { seeds:0, tickets:0, luck:0 };
+try{ ECON = Object.assign(ECON, JSON.parse(LS.get(@@LS_econ@@)||'{}')||{}); }catch(e){}
+function econSave(){ LS.set(@@LS_econ@@, JSON.stringify(ECON)); }
+function econRender(){
+  const free=!!ECON.devFree;
+  $('tickets').textContent = free?'∞':(ECON.tickets||0);
+  $('seeds').textContent = free?'∞':(ECON.seeds||0);
+  const rw=$('rw-tickets'); if(rw) rw.textContent = free?'∞':(ECON.tickets||0);
+  document.querySelectorAll('#reward-games .rg-btn').forEach(b=>{ b.disabled=!(free||ECON.tickets>0); });
+  updateHintBtn();
+}
+
+/* ---------- 稀有度／遠古資料 ---------- */
+const RARITY_NAMES = @@RARITY_NAMES@@;
+const RARITY_BADGE = @@RARITY_BADGE@@;
+function rarityOf(id){
+  const m = MON_BY_ID[id];
+  return m ? (m.stars||1)-1 : 0;
+}
+let MON_BY_ID = {};
+POKEMON.forEach(p=>{ MON_BY_ID[p.id]=p; });
+if(typeof LEGENDS!=='undefined') LEGENDS.forEach(p=>{ MON_BY_ID[p.id]=p; });
+function allMons(){ return (typeof LEGENDS!=='undefined') ? POKEMON.concat(LEGENDS) : POKEMON; }
+
+/* 顏色屬性：越稀有越多色（1~4），以 id 雜湊決定 */
+function colorAttrs(id, N){
+  const rk=rarityOf(id);
+  const n=rk+1;
+  const cols=[]; let h=id*2654435761 % 4294967296;
+  for(let k=0;k<n;k++){ h=(h*1103515245+12345)>>>0; cols.push(h%12); }
+  return [...new Set(cols)].slice(0,Math.max(1,n));
+}
+
+/* ---------- 技能庫／潛能激發 ---------- */
+const SKILLS = [
+  {id:'lucky1', n:'幸運星塵', t:0, d:'下次獎勵小遊戲多 1 顆種子'},
+  {id:'sweep1', n:'微風掃除', t:0, d:'自動標記 1 格沒有@@mon@@ ✕'},
+  {id:'sweep2', n:'色系淨化', t:1, d:'自動標記 2 格沒有@@mon@@ ✕'},
+  {id:'hint1',  n:'心靈感應', t:1, d:'免費提示一隻@@mon@@'},
+  {id:'time15', n:'時間沙·小', t:1, d:'沙漏 +15 秒'},
+  {id:'sweep3', n:'色系暴風', t:2, d:'自動標記 4 格沒有@@mon@@ ✕'},
+  {id:'intel',  n:'情報耳語', t:2, d:'透露可能的藏匿座標'},
+  {id:'time30', n:'時間沙·大', t:2, d:'沙漏 +30 秒'},
+  {id:'reveal', n:'星願爆發', t:3, d:'直接召喚一隻@@mon@@'},
+  {id:'luck2',  n:'幸運共鳴', t:3, d:'下次獎勵必出稀有以上'},
+];
+const AWAKEN_COST = [5,25,125,500];
+const AWAKEN_NAME = ['低階','中階','高階','頂階'];
+let SK = {};   /* monId -> [skillId,...] */
+try{ SK = JSON.parse(LS.get(@@LS_skills@@)||'{}')||{}; }catch(e){ SK={}; }
+function skSave(){ LS.set(@@LS_skills@@, JSON.stringify(SK)); }
+function slotsOf(id){ return rarityOf(id)+1; }
+
+/* ---------- 隨行／友好度 ---------- */
+let BUDDY = { id:0 };
+try{ BUDDY = Object.assign({id:0}, JSON.parse(LS.get(@@LS_buddy@@)||'{}')||{}); }catch(e){}
+let FR = {};  /* monId -> 友好度%（跟著@@mon@@） */
+try{ FR = JSON.parse(LS.get(@@LS_friend@@)||'{}')||{}; }catch(e){ FR={}; }
+try{ /* friend2 過渡期資料：併入當前隨行，避免丟失 */
+  const f2 = +LS.get(@@LS_friend2@@)||0;
+  const bid = (JSON.parse(LS.get(@@LS_buddy@@)||'{"id":0}')||{}).id;
+  if(f2>0 && bid && !(FR[bid]>0)){ FR[bid]=f2; frSave(); }
+}catch(e){}
+function frSave(){ LS.set(@@LS_friend@@, JSON.stringify(FR)); }
+function frOf(id){ return FR[id]||0; }
+
+/* ---------- 隨行引擎：renderBuddy / 閒聊 / 技能發動（v2.0 patch3） ---------- */
+const BUDDY_TALK = [
+  '我在想…今天的冒險會怎麼樣呢？','看那邊！好像有什麼有趣的！','我感受到強大的氣息…','加油！我相信你！','這局好像有點難呢…','嘿！別忘了休息一下～','那個顏色好漂亮！','我好像知道下一步了！','加油！你是最棒的！','嗯…那裡可能有陷阱喔～','trust your instincts!','我有預感…這局會贏！','別著急，慢慢來～','看！那是機會！','我們一起加油吧！💪',
+  '那個區塊看起來很可疑…','我有個好主意！','注意左邊！','右邊好像不安全…','中間！試試中間！','我覺得這裡可以！','不要放棄！','你做得到的！','我支持你！','我們是最佳搭檔！','一起邁向勝利吧！','這局一定能過！','相信自己的直覺！','跟著感覺走！','我會一直陪著你～',
+  '那個顏色…好眼熟…','這個盤面…好像在哪見過？','我聞到獲勝的氣息！','今天的運氣不錯呢！','看來幸運之神站在我們這邊！','這局好像特別簡單？','我感受到勝利的光芒！','加油！再一下下！','不要緊張～','放輕鬆～','享受過程吧！','遊戲最重要的是開心！','笑一笑～','你很厲害呢！','我以你為傲！',
+  '那個角落…有戲！','我看到希望了！','坚持就是勝利！','我們配合得真好！','你是最棒的訓練師！','這局肯定沒問題！','相信我！','跟著我說：我能行！','一步一步來～','慢慢來比較快！','不要急於一時～','時候到了就會過！','順其自然吧！','享受當下！','今天会是美好的一天！',
+'💡 每個顏色區塊、每行每列都只有 1 隻，而且不能互相碰到喔！','💡 先從最大的區塊開始找，選擇最少的地方下手！','💡 不確定的格子先打 ✕ 排除，盤面會越來越清楚！','💡 捕捉器比@@mon@@數量多 3 個，大膽一點沒關係！','💡 卡住的話，用 🌿 提示找一隻還沒抓到的吧！','💡 每行只能有一隻——抓到一隻，那行其他格都能 ✕ 掉！','💡 相鄰的格子（連斜角）都不會有@@mon@@，圍繞著排除！'
+];
+const BUDDY_SKILL_TALK = {
+  sweep1:'嘿！讓我幫你清除一個障礙！',
+  sweep2:'看我的！顏色淨化啟動！',
+  hint1:'我感應到了！這裡有一隻！',
+  time15:'時間…增加了！',
+  time30:'時間…大幅增加！',
+  intel:'噓…我告訴你一個秘密…',
+  reveal:'出來吧！我的力量！',
+  luck1:'幸運星塵，啟動！',
+  luck2:'幸運共鳴，爆發！'
+};
+let buddyIv=null;
+let buddySkillIv=null;
+let buddyChatTimer=null;
+function renderBuddy(){
+  const el=$('buddy');
+  const side=$('buddy-side');
+  const bar=$('buddy-bar');
+  if(!el) return;
+  const m=BUDDY.id ? MON_BY_ID[BUDDY.id] : null;
+  if(!m){ el.style.display='none'; if(side) side.style.display='none'; if(bar) bar.classList.remove('show'); return; }
+  if(side) side.style.display='';
+  el.style.display='';
+  el.classList.remove('st1','st2','st3','st4','st5');
+  el.classList.add('st'+(m.stars||1));
+  $('buddy-img').src=m.img;
+  frRender();
+  renderBuddySkills();
+}
+function buddySkillList(){
+  if(!BUDDY.id) return [];
+  const m=MON_BY_ID[BUDDY.id];
+  const stars=m?(m.stars||1):1;
+  const INNATE=['sweep1','time15','hint1','intel','reveal']; /* 星級自帶池 */
+  const learned=SK[BUDDY.id]||[];
+  const merged=[...learned];
+  for(const s of INNATE.slice(0, stars)){ if(!merged.includes(s)) merged.push(s); }
+  return merged.map(id=>SKILLS.find(s=>s.id===id)).filter(Boolean);
+}
+function renderBuddySkills(){
+  const box=$('buddy-skills');
+  if(!box) return;
+  box.innerHTML='';
+  buddySkillList().forEach(S=>{
+    const b=document.createElement('button');
+    b.className='bskill';
+    b.title=S.d;
+    b.textContent=S.n;
+    const cdMs=[15000,25000,40000,60000][S.t]||20000;
+    b.onclick=(e)=>{
+      e.stopPropagation();
+      if(!G || G.state!=='marking' || G.tutorial){ doBuddyChat('現在不是戰鬥時間～休息一下！'); return; }
+      if(Date.now()<buddySkillCd){ doBuddyChat('技能冷卻中…再等一下！'); return; }
+      buddySkillCd=Date.now()+cdMs;
+      triggerBuddySkill(S.id);
+    };
+    box.appendChild(b);
+  });
+}
+function toggleBuddyChat(){
+  const bub=$('buddy-chat');
+  const show=!bub.classList.contains('show');
+  bub.classList.toggle('show',show);
+  if(show){ if(bub.textContent) clearTimeout(buddyChatTimer); else doBuddyChat(); }
+  else clearTimeout(buddyChatTimer);
+}
+function doBuddyChat(msg){
+  const bub=$('buddy-chat');
+  if(!bub) return;
+  const txt=msg || (G && G.state==='marking' && !G.tutorial && Math.random()<0.3 ? BUDDY_TALK[Math.floor(Math.random()*BUDDY_TALK.length)] : BUDDY_TALK[Math.floor(Math.random()*BUDDY_TALK.length)]);
+  /* v1.6：訊息同步進下方聊天卷軸（保留最近 6 則） */
+  const bar=$('buddy-bar');
+  if(bar && BUDDY.id){
+    bar.classList.add('show');
+    const pill=document.createElement('span');
+    pill.className='bmsg';
+    pill.innerHTML=txt;
+    bar.appendChild(pill);
+    while(bar.children.length>6) bar.removeChild(bar.firstChild);
+    bar.scrollTop=bar.scrollHeight;
+  }
+  bub.innerHTML=txt;
+  bub.classList.add('show');
+  clearTimeout(buddyChatTimer);
+  buddyChatTimer=setTimeout(()=>{ bub.classList.remove('show'); },5500);
+}
+function startBuddyTimers(){
+  clearInterval(buddyIv); clearInterval(buddySkillIv);
+  if(!BUDDY.id) return;
+  const ms=30000+Math.random()*60000; /* 30-90s 閒聊 */
+  buddyIv=setInterval(()=>{ if(G && G.state==='marking' && !G.tutorial) doBuddyChat(); },ms);
+  /* v1.1：技能改為玩家主動按鍵發動，不再自動施放 */
+}
+function stopBuddyTimers(){ clearInterval(buddyIv); clearInterval(buddySkillIv); buddyIv=buddySkillIv=null; }
+function frGain(id, pct){
+  if(!id) return;
+  let f=frOf(id);
+  f=Math.min(100, f+pct);
+  FR[id]=f; frSave();
+  frRender();
+  if(id===BUDDY.id && f>=10 && f%10===0 && f<100){ showHeart(); }
+  if(id===BUDDY.id && f>=25 && f%25===0 && f<100){ doBuddyChat('我們的羈絆更深了！<b>♥ '+(f)+'%</b>'); }
+}
+function frRender(){
+  const el=$('buddy-frp');
+  if(el && BUDDY.id){ el.textContent='♥ '+frOf(BUDDY.id)+'%'; }
+}
+function feedBuddy(){
+  if(!BUDDY.id) return;
+  const b=$('buddy-feed');
+  if(b && b.disabled) return;
+  if(!ECON.devFree && (ECON.seeds||0)<1){ doBuddyChat('還想再吃…可是沒有 🌌 種子了！'); SFX.wrong(); return; }
+  if(!ECON.devFree){ ECON.seeds--; }
+  econSave(); econRender();
+  frGain(BUDDY.id, 5);
+  doBuddyChat('好吃！😋 <b>♥+'+5+'%</b> 謝謝你～');
+  SFX.catchp();
+  if(b){ b.disabled=true; setTimeout(()=>{ b.disabled=false; },1500); }
+}
+function showHeart(){ if(!$('buddy')) return; const h=document.createElement('span'); h.className='bheart'; h.textContent='♥'; h.style.left='48px'; h.style.bottom='110px'; $('buddy').appendChild(h); setTimeout(()=>h.remove(),1100); }
+let buddySkillCd=0;
+function triggerBuddySkill(forceSk){
+  if(!BUDDY.id) return;
+  const m=MON_BY_ID[BUDDY.id];
+  let skills=SK[BUDDY.id]||[];
+  if(!skills.length) skills=['sweep1','time15','hint1']; /* 未學技能：基礎技能照樣發動 */
+  const sk=forceSk || skills[Math.floor(Math.random()*skills.length)];
+  const S=SKILLS.find(x=>x.id===sk);
+  if(!S) return;
+  let done=false;
+  const doMsg=()=>doBuddyChat(BUDDY_SKILL_TALK[sk]||'我用技能了！');
+  if(sk==='sweep1'){ const c=findRandomSafe(); if(c!==-1){ G.cells[c].mark='x'; cellEls[c].classList.add('x'); updateStatus(); SFX.tap(); done=true; } }
+  else if(sk==='sweep2'||sk==='sweep3'){ const n=sk==='sweep3'?4:2; const w=[]; for(let i=0;i<n;i++){ const c=findRandomSafe(); if(c!==-1)w.push(c); } w.forEach(c=>{ G.cells[c].mark='x'; cellEls[c].classList.add('x'); }); updateStatus(); if(w.length)SFX.tap(); done=!!w.length; }
+  else if(sk==='hint1'){ if(typeof freeHint==='function'){ freeHint(); done=true; } }
+  else if(sk==='time15'){ timerAdd(15); done=true; }
+  else if(sk==='time30'){ timerAdd(30); done=true; }
+  else if(sk==='intel'){ const cand=[...G.cats].filter(i=>!G.cells[i].revealed); if(cand.length){ const fr=frOf(BUDDY.id); const sure=cand.filter(()=>Math.random()<fr/100); if(sure.length){ const i=sure[0]; const rc=Math.floor(i/G.N)%G.N+1, cc=i%G.N+1; doBuddyChat('我覺得…<b>第'+rc+'行第'+cc+'列</b>可能有@@mon@@！'); done=true; } else { doBuddyChat('嗯…我也不是很確定呢…'); done=true; } } }
+  else if(sk==='reveal'){ const cand=[...G.cats].filter(i=>!G.cells[i].revealed); if(cand.length){ const i=cand[Math.floor(Math.random()*cand.length)]; G.cells[i].revealed=true; cellEls[i].classList.add('alive'); G.found++; updateStatus(); updateHUD(); SFX.catchp(); done=true; } }
+  else if(sk==='luck1'||sk==='luck2'){ ECON.luck=(ECON.luck||0)|(sk==='luck1'?1:2); econSave(); econRender(); done=true; }
+  if(done){ SFX.catchp(); doMsg(); }
+  else if(forceSk){ doBuddyChat('嗯…現在用不上這個技能呢～'); }
+}
+function findRandomSafe(){ /* 找「確定沒有@@mon@@」且還沒標 ✕ 的格子 */
+  const w=[...G.cells.keys()].filter(i=>!G.cells[i].cat && !G.cells[i].mark && !G.cells[i].revealed);
+  return w.length ? w[Math.floor(Math.random()*w.length)] : -1;
+}
+
+/* 故事系統 */
+let storySeen={}; try{ storySeen=JSON.parse(LS.get(@@LS_story@@)||'{}')||{}; }catch(e){}
+function storySave(){ LS.set(@@LS_story@@, JSON.stringify(storySeen)); }
+const STORY = @@STORY@@;
+function openStory(){
+  let h='<div class="story-list">'; /* v1.5：修復 const 賦值崩潰 */
+  STORY.forEach((s,i)=>{
+    const seen = s.lv ? !!storySeen[s.lv] : true;
+    const badge = s.lv ? ('LV'+s.lv) : '🌟 起源';
+    h+='<div class="story-row"><span class="sr-b">'+badge+(seen?' ✅':'')+'</span><span class="sr-t">'+s.title+'</span><span class="sr-c">'+((s.cast||[]).length+' 位角色')+'</span><button class="btn btn-ghost" onclick="playStory('+i+')">觀看 ▶</button></div>';
+  });
+  h+='</div>';
+  $('game-area').innerHTML=h;
+}
+function playStory(idx){
+  const s=STORY[idx];
+  if(!s) return;
+  if(s.lv){ storySeen[s.lv]=true; storySave(); }
+  const st=$('story-stage');
+  st.querySelectorAll('.cast').forEach(e=>e.remove());
+  const stt=st.querySelector('.st-title');
+  const stb=st.querySelector('.st-body');
+  stt.textContent=s.title;
+  st.classList.add('show');
+  /* 角色立繪：隨劇情進度逐一登場 */
+  const slots=[{x:'5%',y:'34%',w:'24%'},{x:'34%',y:'24%',w:'30%'},{x:'67%',y:'34%',w:'24%'},{x:'14%',y:'62%',w:'21%'},{x:'54%',y:'62%',w:'21%'}];
+  const castEls=(s.cast||[]).map((cid,k)=>{
+    const m=MON_BY_ID[cid]; if(!m) return null;
+    const d=document.createElement('div');
+    d.className='cast';
+    d.innerHTML='<img src="'+m.img+'" alt="">';
+    const sl=slots[k%slots.length];
+    d.style.left=sl.x; d.style.top=sl.y; d.style.width=sl.w; d.style.height='38%';
+    d.style.opacity='0'; d.style.transform='translateY(26px) scale(.85)';
+    st.appendChild(d);
+    return {el:d, at:(k+1)/((s.cast||[]).length+1), name:m.name};
+  }).filter(Boolean);
+  let i=0; stb.textContent='';
+  const shown=new Set();
+  const iv=setInterval(()=>{
+    stb.textContent+=s.text[i]||'';
+    const prog=++i/s.text.length;
+    castEls.forEach((c,k)=>{
+      if(!shown.has(k) && prog>=c.at){
+        shown.add(k);
+        c.el.style.opacity='1'; c.el.style.transform='translateY(0) scale(1)';
+        SFX.catchp();
+      }
+    });
+    if(i>=s.text.length) clearInterval(iv);
+  },28);
+  st.onclick=()=>{ clearInterval(iv); st.classList.remove('show'); if(idx+1<STORY.length) playStory(idx+1); };
+}
+$('menu-story').onclick=()=>{ openStory(); show('ov-game'); $('game-title').textContent='🎬 故事'; $('game-back').onclick=()=>{ hide('ov-game'); show('ov-menu'); }; SFX.tap(); };
+$('story-skip').onclick=()=>{ $('story-stage').classList.remove('show'); };
+
+/* ---------- 工程模式（隱藏：選單標題連點 5 下） ---------- */
+let devTaps=0, devTapT=0;
+(function(){
+  const t=document.querySelector('#ov-menu .menu-title');
+  if(!t) return;
+  t.style.cursor='pointer'; t.style.userSelect='none';
+  t.addEventListener('click',()=>{
+    const now=Date.now();
+    if(now-devTapT>3000) devTaps=0;
+    devTapT=now;
+    if(++devTaps>=5){ devTaps=0; openDev(); }
+  });
+})();
+function openDev(){
+  const bm=BUDDY.id && MON_BY_ID[BUDDY.id] ? MON_BY_ID[BUDDY.id].name : '無';
+  const df=!!ECON.devFree;
+  $('dev-info').innerHTML='🌌 '+(df?'∞':(ECON.seeds||0))+' · 🎟 '+(df?'∞':(ECON.tickets||0))+' · 圖鑑 '+dexGot.size+'/'+allMons().length+' · 🐾 '+bm+(df?' · <b style="color:#06a57d">DEV 無限模式</b>':'');
+  const db=$('dev-free');
+  if(db){ db.textContent='∞ 無限種子：'+(df?'開':'關'); db.style.color=df?'#06a57d':''; }
+  const sel=$('dev-lv'); sel.innerHTML='';
+  for(let n=4;n<=14;n++){
+    const o=document.createElement('option');
+    o.value=n;
+    o.textContent = n===4?'4 示範':(n===5?'5 引導':'LV'+n);
+    sel.appendChild(o);
+  }
+  show('ov-dev'); SFX.tap();
+}
+$('dev-close').onclick=()=>hide('ov-dev');
+$('dev-win').onclick=()=>{
+  if(!G || G.tutorial || G.state!=='marking'){ floatText($('ov-dev'),'目前無進行中的關卡','#d64545'); return; }
+  hide('ov-dev');
+  G.cells.forEach((c,i)=>{ if(c.cat && !c.revealed){ c.revealed=true; cellEls[i].classList.add('alive'); } });
+  G.found=G.N; updateHUD(); updateStatus();
+  G.state='ending'; timerStop();
+  setTimeout(winRound,600);
+};
+$('dev-seeds').onclick=()=>{ ECON.seeds=(ECON.seeds||0)+100; econSave(); econRender(); refreshBest(); openDev(); };
+$('dev-tickets').onclick=()=>{ ECON.tickets=(ECON.tickets||0)+10; econSave(); econRender(); refreshBest(); openDev(); };
+$('dev-jump').onclick=()=>{ const n=+$('dev-lv').value; if(!n||n<4||n>14) return; hide('ov-dev'); hide('ov-menu'); newRun(n); };
+$('dev-unlock').onclick=()=>{ lockSave({lastOk:Date.now()}); floatText($('ov-dev'),'已解除 24h 鎖','#06a57d'); };
+$('dev-free').onclick=()=>{ ECON.devFree=!ECON.devFree; econSave(); econRender(); refreshBest(); openDev(); };
+$('dev-reward').onclick=()=>{ hide('ov-dev'); econRender(); show('ov-reward'); SFX.tap(); };
+$('buddy-feed').onclick=(e)=>{ e.stopPropagation(); feedBuddy(); };
+$('dev-feed').onclick=()=>{
+  if(!BUDDY.id){ floatText($('ov-dev'),'尚未設定隨行@@mon@@（圖鑑→點@@mon@@→設為隨行）','#d64545'); return; }
+  frGain(BUDDY.id,10);
+  doBuddyChat('好吃！😊 謝謝你～<b>♥ '+frOf(BUDDY.id)+'%</b>');
+  openDev();
+  floatText($('ov-dev'),'🍖 '+MON_BY_ID[BUDDY.id].name+' 友好度 '+frOf(BUDDY.id)+'%','#06a57d');
+};
+$('dev-skill').onclick=()=>{
+  if(!BUDDY.id){ floatText($('ov-dev'),'尚未設定隨行@@mon@@','#d64545'); return; }
+  if(!G || G.state!=='marking' || G.tutorial){ floatText($('ov-dev'),'需在關卡標記階段才能測試','#d64545'); return; }
+  if(!(SK[BUDDY.id]||[]).length){
+    SK[BUDDY.id]=SKILLS.map(s=>s.id);
+    skSave();
+    doBuddyChat('【DEV】我把全部技能都學會了 ⚡');
+  }
+  hide('ov-dev');
+  setTimeout(()=>triggerBuddySkill(),350);
+};
+$('dev-wipe').onclick=()=>{
+  if(!confirm('清除所有存檔？（分數／圖鑑／種子／技能／隨行全部重置）')) return;
+  [@@LS_dex@@,@@LS_sound@@,@@LS_lv@@,@@LS_lock@@,@@LS_econ@@,@@LS_skills@@,@@LS_buddy@@,@@LS_friend@@,@@LS_friend2@@,@@LS_story@@].forEach(k=>{ try{ localStorage.removeItem(k); }catch(e){} });
+  location.reload();
+};
+
+/* 過關時友好度+5% + 觸發故事 */
+const OLD_WINROUND = winRound;
+winRound = function(){
+  const oldArgs=arguments;
+  ECON.streak=(ECON.streak||0)+1; econSave();
+  if(BUDDY.id && G && G.N>=4){ frGain(BUDDY.id, 5); }
+  /* 首次過關觸發故事 */
+  if(G && G.N>=4 && !storySeen[G.N] && STORY.find(s=>s.lv===G.N)){
+    setTimeout(()=>{ playStory(STORY.findIndex(s=>s.lv===G.N)); }, 1200);
+  }
+  return OLD_WINROUND.apply(this, oldArgs);
+};
+
+/* ---------- 24 小時密碼鎖 ---------- */
+const LOCK_KEY=@@LS_lock@@;
+function lockState(){ try{ return JSON.parse(LS.get(LOCK_KEY))||{}; }catch(e){ return {}; } }
+function lockSave(s){ LS.set(LOCK_KEY, JSON.stringify(s)); }
+let lockIv=null;
+function lockNeeded(){
+  const s=lockState();
+  return !s.lastOk || Date.now()-s.lastOk>=24*3600*1000;
+}
+function fmtDur(ms){
+  const s=Math.max(0,Math.ceil(ms/1000));
+  const d=Math.floor(s/86400), h=Math.floor(s%86400/3600), m=Math.floor(s%3600/60), ss=s%60;
+  if(d>=1) return d+' 天 '+h+' 小時';
+  if(h>=1) return h+' 小時 '+m+' 分';
+  return m+' 分 '+String(ss).padStart(2,'0')+' 秒';
+}
+function evalLock(){
+  if(lockIv){ clearInterval(lockIv); lockIv=null; }
+  const s=lockState(), now=Date.now();
+  if(s.banUntil && now<s.banUntil){ lockBan(s); return; }
+  if(s.cdUntil && now<s.cdUntil){ lockCooldown(s); return; }
+  if(lockNeeded()){ lockInput(); return; }
+  hide('ov-lock');
+  if(!G || G.state!=='marking'){ show('ov-menu'); refreshBest(); }
+}
+function lockInput(){
+  show('ov-lock');
+  $('lock-emoji').textContent='🔒';
+  $('lock-title').textContent='輸入遊戲密碼';
+  $('lock-sub').textContent='每 24 小時驗證一次';
+  $('lock-input').style.display='';
+  $('lock-ok').style.display='';
+  $('lock-input').disabled=false;
+  $('lock-input').value='';
+  $('lock-info').textContent='';
+  setTimeout(()=>{ try{ $('lock-input').focus(); }catch(e){} }, 150);
+}
+function lockCooldown(s){
+  show('ov-lock');
+  $('lock-emoji').textContent='❄️';
+  $('lock-title').textContent='暫時鎖定';
+  $('lock-input').style.display='none';
+  $('lock-ok').style.display='none';
+  $('lock-info').textContent='';
+  const upd=()=>{
+    const left=(s.cdUntil||0)-Date.now();
+    if(left<=0){ evalLock(); return; }
+    $('lock-sub').textContent='連續輸錯 3 次，冷卻 '+fmtDur(left)+' 後可再試';
+  };
+  upd();
+  lockIv=setInterval(upd, 1000);
+}
+function lockBan(s){
+  show('ov-lock');
+  $('lock-emoji').textContent='🚫';
+  $('lock-title').textContent='禁玩中';
+  $('lock-input').style.display='none';
+  $('lock-ok').style.display='none';
+  $('lock-info').textContent='連續錯誤 10 次';
+  const upd=()=>{
+    const left=(s.banUntil||0)-Date.now();
+    if(left<=0){ evalLock(); return; }
+    $('lock-sub').textContent='剩餘 '+fmtDur(left);
+  };
+  upd();
+  lockIv=setInterval(upd, 30000);
+}
+function lockTry(){
+  if($('lock-input').style.display==='none') return;
+  const v=$('lock-input').value.trim();
+  const s=lockState(); s.wrong=s.wrong||0;
+  if(v==='6688'){
+    s.lastOk=Date.now(); s.wrong=0; s.cdUntil=0;
+    lockSave(s);
+    $('lock-input').value='';
+    SFX.catchp();
+    evalLock();
+    return;
+  }
+  s.wrong++;
+  if(s.wrong>=10){
+    s.banUntil=Date.now()+10000*3600*1000;
+    lockSave(s); SFX.fail(); lockBan(s); return;
+  }
+  if(s.wrong%3===0){
+    s.cdUntil=Math.max(s.cdUntil||0, Date.now())+10*60*1000;
+    lockSave(s); SFX.wrong(); lockCooldown(s); return;
+  }
+  lockSave(s); SFX.wrong();
+  $('lock-info').textContent='密碼錯誤（連續 '+s.wrong+' 次）';
+}
+$('lock-ok').onclick = lockTry;
+$('lock-input').addEventListener('keydown', e=>{ if(e.key==='Enter') lockTry(); });
+
+/* ---------- 遊戲狀態 ---------- */
+let G = null;
+let cellEls = [];
+let demoToken = 0;
+const TUT = { expect:null };
+
+function newRun(N){
+  if(lockNeeded()){ lockInput(); return; }
+  G = { N, round:1, lastFail:false, nextMode:null, hintFreeUsed:false,
+        tutorial: N===4?'demo':(N===5?'guided':null) };
+  startBuddyTimers();
+  newBoard();
+}
+
+function newBoard(){
+  const N = G.N;
+  if(N>=10){
+    const ro = poolTake(N);
+    if(ro){
+      const sol = N>=16 ? solve2(N, ro, 500000, 5) : solve2(N, ro);
+      if(sol && sol.length>=1 && (N>=16 ? sol.length<=4 : sol.length===1)){
+        const cats=new Set(); for(let r=0;r<N;r++) cats.add(r*N+sol[0][r]);
+        finishBoard({cats, regionOf:ro, allSols: N>=16 ? sol : null});
+        poolRefill();
+        return;
+      }
+    }
+  }
+  $('gen-what').textContent = N+' × '+N+(G.tutorial?' 教學盤':' 唯一解盤面');
+  show('ov-loading');
+  setTimeout(()=>{
+    let pz=null;
+    if(N>=14){ pz=generatePuzzle(N,8000); }
+    else { for(const b of [1200,3000,8000]){ pz=generatePuzzle(N,b); if(pz) break; } }
+    hide('ov-loading');
+    if(pz){ finishBoard(pz); poolRefill(); }
+    else {
+      G.state='done';
+      const sub=$('genfail-sub');
+      if(sub){ sub.textContent = N>=14 ? '大盤面的唯一解需要點運氣，建議重試一次，或先玩較小的盤面～' : '這次運氣不好，再試一次？'; }
+      show('ov-genfail');
+    }
+  }, 60);
+}
+
+function finishBoard(pz){
+  const N = G.N;
+  G.cats = pz.cats; G.regionOf = pz.regionOf;
+  /* 多解盤：全部解的星格並集（點中任一解的星都算貓） */
+  G.catUnion = new Set();
+  if(pz.allSols && pz.allSols.length){
+    pz.allSols.forEach(s=>{ for(let r=0;r<N;r++) G.catUnion.add(r*N+s[r]); });
+  } else { pz.cats.forEach(i=>G.catUnion.add(i)); }
+  G.cells = [];
+  for(let i=0;i<N*N;i++) G.cells.push({ cat: pz.cats.has(i), region: pz.regionOf[i], mark:'' });
+  const pool = shuffle([...POKEMON]).slice(0, Math.max(N, G.catUnion.size));
+  [...G.catUnion].sort((a,b)=>a-b).forEach((ci,k)=>{ G.cells[ci].poke = pool[k]; });
+  G.state='marking'; G.balls=N+3; G.ballMode=false; G.found=0; G.lastFail=false; /* v1.3：隻數+3 容錯 */
+  if(typeof updateHintBtn==='function') updateHintBtn();
+  G.colors = assignRegionColors(N, G.regionOf, buildPalette(N));
+  renderBoard();
+  $('btn-clear').disabled=!!G.tutorial;
+  $('btn-ball').disabled=false; $('btn-ball').classList.remove('active'); $('ball-n').textContent='×'+G.balls;
+  document.body.classList.remove('ball-mode');
+  timerStart();
+  updateHUD(); updateStatus(); renderLV();
+  demoToken++;
+  tutHide();
+  if(G.tutorial==='demo') startDemo();
+  else if(G.tutorial==='guided') startGuided();
+}
+
+function renderBoard(){
+  const N=G.N;
+  const board=$('board'), cc=$('colcounts'), rc=$('rowcounts');
+  board.innerHTML=''; cc.innerHTML=''; rc.innerHTML='';
+  /* v2.1：13/14 也用 1fr 自適應（縮小方格，取消捲動） */
+  board.style.width = cc.style.width = '';
+  board.style.gridTemplateColumns = 'repeat('+N+',1fr)';
+  cc.style.gridTemplateColumns = 'repeat('+N+',1fr)';
+  rc.style.gridTemplateRows = 'repeat('+N+',1fr)';
+  cellEls = [];
+  for(let i=0;i<N*N;i++){
+    const d=document.createElement('div');
+    d.className='cell'+(G.cells[i].poke?(' st'+(G.cells[i].poke.stars||1)):'');
+    d.style.background = G.colors[G.cells[i].region];
+    d.innerHTML = '<span class="mk">✕</span><span class="catface"><img alt="" draggable="false"></span>';
+    const im=d.querySelector('.catface img');
+    if(G.cells[i].poke) im.src = G.cells[i].poke.img;
+    d.addEventListener('click', ()=>onCell(i));
+    board.appendChild(d); cellEls.push(d);
+  }
+  for(let c=0;c<N;c++){ const s=document.createElement('span'); s.textContent=c+1; cc.appendChild(s); }
+  for(let r=0;r<N;r++){ const s=document.createElement('span'); s.textContent=r+1; rc.appendChild(s); }
+  sizeFont();
+  syncDexSize();
+}
+function syncDexSize(){ /* 圖鑑圖示固定＝6×6 時的方格尺寸（上限 92px） */
+  const base = $('board-area').clientWidth || 440;
+  const px = Math.min(92, Math.floor((base - 5*5) / 6));
+  document.documentElement.style.setProperty('--dexpx', px+'px');
+}
+function sizeFont(){
+  const board=$('board');
+  const px = Math.max(20, board.clientWidth / G.N);
+  board.style.fontSize = Math.max(8, Math.floor(px*0.5)) + 'px';
+}
+window.addEventListener('resize', ()=>{ if(G && cellEls.length){ sizeFont(); syncDexSize(); } });
+
+function neighbors8(i,N){
+  const r=Math.floor(i/N), c=i%N, out=[];
+  for(let dr=-1;dr<=1;dr++)for(let dc=-1;dc<=1;dc++){
+    if(!dr&&!dc) continue;
+    const rr=r+dr, cc=c+dc;
+    if(rr>=0&&rr<N&&cc>=0&&cc<N) out.push(rr*N+cc);
+  }
+  return out;
+}
+function markToggle(i){
+  const c=G.cells[i];
+  c.mark = (c.mark==='x') ? '' : 'x';
+  cellEls[i].classList.toggle('x', c.mark==='x');
+  (c.mark==='x'?SFX.tap:SFX.untap)();
+  updateStatus();
+}
+function setBallMode(on){
+  G.ballMode=on;
+  document.body.classList.toggle('ball-mode', on);
+  $('btn-ball').classList.toggle('active', on);
+  updateStatus();
+}
+function doBall(i){
+  if(G.balls<=0) return;
+  const c=G.cells[i];
+  if(c.revealed) return;
+  G.balls--;
+  SFX.ball();
+  const el=cellEls[i];
+  if(c.cat || G.catUnion.has(i)){
+    c.revealed=true; c.mark='';
+    el.classList.remove('x');
+    G.found++;
+    el.classList.add('cat');
+    const isNew = c.poke ? dexCollect(c.poke.id) : false;
+    const isFive = !!(c.poke && c.poke.stars===5);
+    if(isNew) spawnCatchText(el, isFive);
+    if(isNew && !G.tutorial && c.poke){ /* 新發現：等寵物落到格子後彈出星空發現視窗 */
+      const mm=c.poke, gg=G;
+      setTimeout(()=>{ if(G===gg) queueNewMon(mm); }, isFive?4250:2150);
+    }
+    if(isFive){ confetti(); SFX.win(); } /* 5★ 降臨：煙火慶祝 */
+    SFX.catchp();
+    if(!G.tutorial && TIMER.on){
+      timerAdd(30);
+      setTimeout(()=>floatText(el,'+30s ⏱','#1f7a46'), 380);
+    }
+    updateStatus();
+    /* 滿好感（100%）加成：捕獲後自動排除同行同列（邏輯必然安全） */
+    if(!G.tutorial && BUDDY.id && frOf(BUDDY.id)>=100){
+      const curG=G;
+      const N=G.N, rr=Math.floor(i/N), cc2=i%N;
+      const tset=new Set();
+      for(let c3=0;c3<N;c3++){ if(rr*N+c3!==i) tset.add(rr*N+c3); }
+      for(let r3=0;r3<N;r3++){ if(r3*N+cc2!==i) tset.add(r3*N+cc2); }
+      for(const nb of neighbors8(i,N)) tset.add(nb); /* 周圍八格（含斜角）也安全 */
+      const targets=[...tset].filter(j=>!curG.cells[j].mark && !curG.cells[j].revealed);
+      const animMs = isFive?4200:2200; /* 等@@mon@@出現動畫結束 */
+      targets.forEach((j,k)=>{
+        setTimeout(()=>{
+          if(G===curG && G.state==='marking' && !curG.cells[j].mark && !curG.cells[j].revealed){
+            curG.cells[j].mark='x';
+            cellEls[j].classList.add('x');
+            SFX.tap();
+            updateStatus();
+          }
+        }, animMs + k*200);
+      });
+      if(targets.length) doBuddyChat('滿滿的羈絆！這行、這列和周圍我都幫你排除了 ✕');
+    }
+  } else {
+    c.mark='x';
+    el.classList.add('x','missflash');
+    setTimeout(()=>el.classList.remove('missflash'),600);
+    floatText(el,'落空','#8a7d6f');
+    SFX.miss();
+    updateStatus();
+  }
+  if(G.balls<=0) setBallMode(false);
+  $('ball-n').textContent='×'+G.balls;
+  checkBallEnd();
+}
+
+function onCell(i){
+  if(!G || G.state!=='marking') return;
+  if(TUT.expect){
+    if(TUT.expect.type==='cell' && TUT.expect.cells.has(i)){
+      const f=TUT.expect.fn; clearExpect(); f(i);
+    } else tutNudge();
+    return;
+  }
+  if(G.ballMode && G.balls>0){ doBall(i); return; }
+  markToggle(i);
+}
+
+function updateCounts(){ /* 座標為靜態標籤 1..N，無需更新 */ }
+
+function updateStatus(){
+  const cand = G.cells.filter(c=>c.mark!=='x').length;
+  const okk = cand===G.N ? ' ✅' : '';
+  $('status').innerHTML = '候選 <b>'+cand+'</b> 格 · @@mon@@ <b>'+G.N+'</b> 隻 · 已排除 <b>'+(G.cells.length-cand)+'</b> 格'+okk+(G.ballMode?' · 🎯 <b>@@ball_name@@模式：點方格捕獲</b>':'');
+}
+
+function updateHUD(){
+  $('round').textContent = G.round;
+  $('score').textContent = lvTotal();
+  renderHearts();
+}
+function renderHearts(){
+  const el=$('hearts');
+  while(el.children.length<3){ const s=document.createElement('span'); s.className='hrt'; s.textContent='❤️'; el.appendChild(s); }
+}
+
+/* ---------- 沙漏計時器 ---------- */
+const TIMER = { total:0, left:0, on:false, iv:null, last:0, el:0, lastWhole:-1 };
+function timerPaused(){
+  return document.hidden || !!document.querySelector('.overlay.show');
+}
+function timerStart(){
+  if(G.tutorial){ $('hud-timer').style.display='none'; TIMER.on=false; return; }
+  TIMER.total=G.N*60; TIMER.left=TIMER.total; TIMER.el=0; TIMER.on=true; TIMER.lastWhole=-1;
+  TIMER.last=performance.now();
+  $('hud-timer').style.display='inline-flex';
+  $('hud-timer').classList.remove('hg-danger','hg-crit');
+  if(!TIMER.iv) TIMER.iv=setInterval(timerTick,200);
+  renderTimer();
+}
+function timerStop(){ TIMER.on=false; }
+function timerTick(){
+  if(!TIMER.on) return;
+  const now=performance.now();
+  if(!timerPaused()) TIMER.left -= (now-TIMER.last)/1000;
+  TIMER.last=now;
+  if(TIMER.left<=0){ TIMER.left=0; renderTimer(); timeUp(); return; }
+  renderTimer();
+}
+function timerAdd(sec){
+  if(!TIMER.on) return;
+  TIMER.left=Math.min(TIMER.total, TIMER.left+sec);
+  SFX.bonus();
+  const h=$('hud-timer');
+  h.classList.remove('hg-pulse'); void h.offsetWidth; h.classList.add('hg-pulse');
+  floatText(h, '+'+sec+'s', '#1f7a46');
+  renderTimer();
+}
+function fmtTime(s){ s=Math.ceil(s); return Math.floor(s/60)+':'+String(s%60).padStart(2,'0'); }
+function renderTimer(){
+  if(!TIMER.on && TIMER.left<=0) return;
+  const f=Math.max(0, Math.min(1, TIMER.left/TIMER.total));
+  TIMER.el=Math.max(TIMER.el, 1-f);
+  $('time-text').textContent=fmtTime(TIMER.left);
+  const topClip=$('clipTop'), botClip=$('clipBot'), stream=$('hg-stream');
+  const th=11*f; topClip.setAttribute('y', String(15-th)); topClip.setAttribute('height', String(th));
+  const bh=10.6*TIMER.el; botClip.setAttribute('y', String(27.6-bh)); botClip.setAttribute('height', String(bh));
+  const flowing = TIMER.on && !timerPaused() && f>0.002 && TIMER.el<0.998;
+  stream.style.opacity = flowing ? 1 : 0;
+  const h=$('hud-timer');
+  h.classList.toggle('hg-danger', TIMER.left<=60 && TIMER.on);
+  h.classList.toggle('hg-crit', TIMER.left<=10 && TIMER.on);
+  const w=Math.floor(TIMER.left);
+  if(TIMER.on && TIMER.left<=10 && TIMER.left>0 && w!==TIMER.lastWhole){ TIMER.lastWhole=w; SFX.tick(); }
+}
+function timeUp(){
+  if(!G || G.state!=='marking') return;
+  timerStop(); G.state='ending';
+  G.cells.forEach((c,i)=>{ if(c.cat && !c.revealed && c.mark!=='x') cellEls[i].classList.add('ghost'); });
+  SFX.fail();
+  setTimeout(timeoutRound, 900);
+}
+function timeoutRound(){
+  G.state='done'; G.lastFail=true;
+  ECON.streak=0; econSave();
+  const left=G.N-G.found;
+  $('res-emoji').textContent='⏰';
+  $('res-title').textContent='時間到！';
+  $('res-sub').textContent='沙漏的沙流光了…還有 '+left+' 隻@@mon@@沒找到（位置已揭示）';
+  let bd='';
+  bd+=row('🎯 捕獲@@mon@@', G.found+' / '+G.N, '+0', '');
+  bd+='<div class="row" style="border-top:1px dashed #ddd0ba;margin-top:6px;padding-top:6px"><span><b>個人總分</b></span><span><b>'+fmtSec(lvTotal())+'</b></span></div>';
+  $('res-breakdown').innerHTML=bd;
+  $('res-next').textContent='再挑戰一局';
+  setupResSel();
+  show('ov-result');
+}
+
+/* ---------- 圖鑑 ---------- */
+let dexGot = new Set();
+try{ dexGot = new Set(JSON.parse(LS.get(@@LS_dex@@)||'[]')); }catch(e){}
+(function(){ const v=new Set(POKEMON.map(p=>p.id)); let ch=false; dexGot=new Set([...dexGot].filter(id=>{ if(v.has(id)) return true; ch=true; return false; })); if(ch){ LS.set(@@LS_dex@@, JSON.stringify([...dexGot])); } })();
+let dexTab='all';
+function renderDex(){
+  const grid=$('dex-grid'); if(!grid) return; grid.innerHTML='';
+  allMons().forEach(p=>{
+    const d=document.createElement('div');
+    d.className='dex-cell s'+(p.stars||1)+(dexGot.has(p.id)?' got':'');
+    d.id='dex-'+p.id;
+    d.innerHTML='<span class="nb">#'+p.id+'</span><img src="'+p.img+'" alt="'+p.name+'">';
+    d.title = dexGot.has(p.id) ? p.name : '未捕獲';
+    d.addEventListener('click', ()=>showDexDetail(p));
+    grid.appendChild(d);
+  });
+  dexCount();
+}
+function dexCount(){
+  const dc=$('dex-count'); if(!dc) return;
+  const all=allMons();
+  const done = dexGot.size>=all.length;
+  dc.textContent = (done?'🎉 收藏完成！':'收藏 ')+dexGot.size+' / '+all.length;
+}
+function dexPoolByTab(){
+  const all=allMons();
+  if(dexTab==='gen1') return POKEMON;
+  if(dexTab==='legend') return (typeof LEGENDS!=='undefined')?LEGENDS:[];
+  return all;
+}
+function renderDexFull(){
+  const grid=$('dexfull-grid'); grid.innerHTML='';
+  const pool=dexPoolByTab();
+  pool.forEach(p=>{
+    const d=document.createElement('div');
+    d.className='dex-cell s'+(p.stars||1)+(dexGot.has(p.id)?' got':'');
+    d.id='df-'+p.id;
+    const rk=rarityOf(p.id);
+    d.innerHTML='<span class="nb">'+RARITY_NAMES[rk]+'</span><img src="'+p.img+'" alt="'+p.name+'">';
+    d.title=(dexGot.has(p.id)?RARITY_NAMES[rk]+' · '+p.name:'未捕獲 · '+RARITY_NAMES[rk]);
+    d.addEventListener('click', ()=>showDexDetail(p));
+    grid.appendChild(d);
+  });
+  const gotInPool=pool.filter(p=>dexGot.has(p.id)).length;
+  $('dexfull-count').textContent='收藏 '+gotInPool+' / '+pool.length+'（全部 '+dexGot.size+' / '+allMons().length+'）'+(dexGot.size>=allMons().length?' 🎉 收藏完成！':'');
+}
+document.querySelectorAll('.dtab').forEach(b=>{
+  b.onclick=()=>{
+    document.querySelectorAll('.dtab').forEach(x=>x.classList.remove('on'));
+    b.classList.add('on');
+    dexTab=b.dataset.t;
+    renderDexFull();
+    SFX.tap();
+  };
+});
+let dexdMon=null;
+function showDexDetail(p){
+  dexdMon=p;
+  const got = dexGot.has(p.id);
+  const rk = rarityOf(p.id);
+  $('dexd-img').src = p.img;
+  $('dexd-img').style.filter = got ? 'none' : 'grayscale(1) opacity(.35)';
+  $('dexd-name').textContent = got ? p.name : '？？？';
+  $('dexd-sub').textContent = '#'+p.id+' · '+RARITY_BADGE[rk]+' '+RARITY_NAMES[rk]+' · '+(got ? '已收藏 ✅' : '尚未捕獲');
+  const ex=$('dexd-extra');
+  const bb=$('dexd-buddy');
+  if(!got){ ex.innerHTML='<div class="sub" style="text-align:center">捕獲後可設為隨行、潛能激發</div>'; bb.style.display='none'; }
+  else {
+    const fr=frOf(p.id);
+    const skills=SK[p.id]||[];
+    const slots=slotsOf(p.id);
+    let h='';
+    h+='<div class="skrow"><span>🐾 友好度</span><span>'+fr+'%</span></div>';
+    h+='<div class="frbar"><i style="width:'+fr+'%"></i></div>';
+    h+='<div class="skrow"><span>⭐ 技能槽 '+skills.length+' / '+slots+'</span><span>'+(BUDDY.id===p.id?'隨行中 🐾':'')+'</span></div>';
+    skills.forEach(sk=>{
+      const S=SKILLS.find(x=>x.id===sk);
+      if(S) h+='<div class="skrow"><span>'+S.n+'<br><small style="color:#a39483">'+S.d+'</small></span><span class="tier t'+S.t+'">'+['低','中','高','頂'][S.t]+'</span></div>';
+    });
+    if(skills.length<slots){
+      h+='<div style="font-size:12px;color:#8a7d6f;margin-top:8px">⚡ 潛能激發（隨機學習技能，可重複）</div><div class="awaken-tiers">';
+      AWAKEN_COST.forEach((c,t)=>{
+        h+='<button class="awk-btn" data-cost="'+c+'" data-tier="'+t+'"><b>🌌 '+c+'</b>'+AWAKEN_NAME[t]+'</button>';
+      });
+      h+='</div>';
+    } else {
+      h+='<div class="sub" style="text-align:center;margin-top:6px">技能槽已滿 ✨</div>';
+    }
+    ex.innerHTML=h;
+    ex.querySelectorAll('.awk-btn').forEach(b=>{
+      b.disabled = !ECON.devFree && (ECON.seeds||0) < +b.dataset.cost;
+      b.onclick=()=>doAwaken(p.id, +b.dataset.cost, +b.dataset.tier);
+    });
+    bb.style.display='';
+    bb.textContent = (BUDDY.id===p.id) ? '解除隨行' : '🐾 設為隨行';
+  }
+  show('ov-dex');
+}
+$('dexd-buddy').onclick=()=>{
+  if(!dexdMon) return;
+  if(BUDDY.id===dexdMon.id){ BUDDY.id=0; }
+  else { BUDDY.id=dexdMon.id; }
+  LS.set(@@LS_buddy@@, JSON.stringify(BUDDY));
+  if(typeof renderBuddy==='function') renderBuddy();
+  showDexDetail(dexdMon);
+  SFX.catchp();
+};
+function doAwaken(id, cost, tier){
+  if(!ECON.devFree){
+    if((ECON.seeds||0)<cost){ SFX.wrong(); return; }
+    ECON.seeds-=cost;
+  }
+  econSave(); econRender();
+  if(typeof renderBuddySkills==='function') setTimeout(renderBuddySkills, 200);
+  /* 抽技能：檔位加權（選定檔 60%、以下各層遞減） */
+  const pool=[];
+  SKILLS.forEach(sk=>{
+    let w = sk.t===tier?6:(sk.t<tier?(tier-sk.t):0);
+    if(sk.t>tier) w=0;
+    for(let k=0;k<w;k++) pool.push(sk);
+  });
+  const S=pool[Math.floor(Math.random()*pool.length)];
+  const skills=SK[id]=SK[id]||[];
+  if(skills.length>=slotsOf(id)){ floatText($('dexd-extra'),'技能槽已滿','#d64545'); return; }
+  if(skills.includes(S.id)){
+    const refund=Math.ceil(cost/2);
+    ECON.seeds+=refund; econSave(); econRender();
+    SFX.miss();
+    alert('已經學會「'+S.n+'」了！\n潛能轉化為星願種子 🌌+'+refund);
+  } else {
+    skills.push(S.id); skSave();
+    SFX.catchp();
+    alert('✨ 潛能激發成功！\n學會了「'+S.n+'」\n'+S.d);
+  }
+  if(dexdMon) showDexDetail(dexdMon);
+}
+$('dexd-close').onclick = ()=>hide('ov-dex');
+function openDexFull(){ renderDexFull(); show('ov-dexfull'); SFX.tap(); }
+$('menu-dex').onclick=()=>{ openDexFull(); };
+$('btn-lv').onclick=()=>{ renderLV(); show('ov-lv'); SFX.tap(); };
+$('lv-close').onclick=()=>hide('ov-lv');
+$('menu-record').onclick=()=>{ renderLV(); show('ov-lv'); SFX.tap(); };
+$('dexfull-close').onclick = ()=>hide('ov-dexfull');
+$('dexfull-reset').onclick = ()=>{
+  if(!confirm('確定要清空@@mon@@收藏嗎？（此動作無法復元）')) return;
+  dexGot = new Set();
+  LS.set(@@LS_dex@@,'[]');
+  renderDexFull(); renderDex();
+  SFX.wrong();
+};
+$('btn-dex').onclick = openDexFull;
+function dexCollect(id){
+  if(dexGot.has(id)) return false;
+  dexGot.add(id);
+  LS.set(@@LS_dex@@, JSON.stringify([...dexGot]));
+  const el=$('dex-'+id);
+  if(el){ el.classList.add('got','new'); setTimeout(()=>el.classList.remove('new'),1200); }
+  dexCount();
+  return true;
+}
+
+/* ---------- 新夥伴發現彈窗（星空風）：點擊畫面任意處回到遊戲 ---------- */
+let nmQueue=[], nmOpen=false;
+function queueNewMon(m){
+  if(!m) return;
+  nmQueue.push(m);
+  if(!nmOpen) showNextNewMon();
+}
+function showNextNewMon(){
+  const m=nmQueue.shift();
+  if(!m){ nmOpen=false; return; }
+  nmOpen=true;
+  const rk=rarityOf(m.id);
+  const im=$('nm-img');
+  im.className='st'+(m.stars||1);
+  im.src=m.img;
+  $('nm-name').textContent='No.'+String(m.id).padStart(3,'0')+' '+m.name;
+  $('nm-sub').textContent=RARITY_BADGE[rk]+' '+RARITY_NAMES[rk]+' · 繼續挑戰，收集更多@@mon@@吧！';
+  show('ov-newmon');
+  SFX.discover();
+}
+function closeNewMon(){
+  if(!nmOpen) return;
+  nmOpen=false;
+  hide('ov-newmon');
+  if(nmQueue.length) setTimeout(showNextNewMon, 280);
+}
+$('ov-newmon').addEventListener('click', closeNewMon);
+
+/* ---------- 獎勵中心：六小遊戲（v2.0 patch2b） ---------- */
+let GAME=null;
+const G_TITLES={scratch:'🪙 刮刮樂',slot:'🎰 拉霸機',cards:'🃏 翻牌抽卡',wheel:'🎡 幸運輪盤',sil:'👤 猜剪影',tiles:'⛏ 尋寶九宮格'};
+
+function wpick(arr,wf){
+  const w=arr.map(wf); let s=w.reduce((a,b)=>a+b,0), r=Math.random()*s;
+  for(let k=0;k<arr.length;k++){ r-=w[k]; if(r<=0) return arr[k]; }
+  return arr[arr.length-1];
+}
+function prizeMonPool(){ return allMons().filter(p=>rarityOf(p.id)>=1 && !dexGot.has(p.id)); }
+function rollMon(){
+  /* v1.2：星數越多機率越低；棋盤格數越多、連勝越多 → 高星機率增加 */
+  const N = G ? G.N : 6;
+  const lvlBonus = Math.max(0, N-9);
+  const streak = Math.min(20, ECON.streak||0);
+  const W=[6, 3, 1.5, 0.7];
+  return wpick(prizeMonPool(), p=>{
+    const r=rarityOf(p.id);
+    let w=W[r-1]||1;
+    const lk=[0,0.18,0.30,0.45][r-1]||0;  /* 加成斜率：星越高吃越多 */
+    const sk=[0,0.08,0.14,0.22][r-1]||0;
+    w*= 1+lk*lvlBonus;
+    w*= 1+sk*streak;
+    return w;
+  });
+}
+/* 抽獎核心：16% @@mon@@（稀有↑），其餘種子 1~5；luck1=星塵+1、luck2=必出@@mon@@（各消耗一次） */
+function rollPrize(opt){
+  opt=opt||{};
+  let force=!!opt.forceMon;
+  if(GAME && GAME.luck2){ force=true; GAME.luck2=false; }
+  if(force || Math.random()<(opt.monC!=null?opt.monC:0.16)){
+    const m=rollMon();
+    if(m) return {type:'mon', mon:m};
+  }
+  const table=[1,1,1,2,2,2,3,3,4,5];
+  let n=table[Math.floor(Math.random()*table.length)];
+  if(GAME && GAME.luck1){ n+=1; GAME.luck1=false; }
+  return {type:'seed', n:n};
+}
+function awardPrize(pz){
+  if(!pz) return '';
+  if(pz.type==='seed'){
+    ECON.seeds=(ECON.seeds||0)+pz.n; econSave(); econRender();
+    return '<div class="g-prize">🌌 ×'+pz.n+'<span class="g-sub">星願種子入袋！</span></div>';
+  }
+  const m=pz.mon;
+  if(dexGot.has(m.id)){
+    ECON.seeds=(ECON.seeds||0)+2; econSave(); econRender();
+    return '<div class="g-prize"><img src="'+m.img+'" alt="">'+m.name+'<span class="g-sub">已擁有 → 轉為 🌌×2</span></div>';
+  }
+  dexCollect(m.id);
+  SFX.catchp();
+  return '<div class="g-prize"><img src="'+m.img+'" alt="">✨ '+m.name+'<span class="g-sub">'+RARITY_BADGE[rarityOf(m.id)]+' '+RARITY_NAMES[rarityOf(m.id)]+' · 加入圖鑑！</span></div>';
+}
+function startGame(g){
+  if(!g || !G_TITLES[g]) return;
+  if(!ECON.devFree){
+    if((ECON.tickets||0)<1){ SFX.wrong(); floatText($('reward-games'),'沒有獎勵券了！過關可 +1 🎟','#d64545'); return; }
+    ECON.tickets--; econSave();
+  }
+  GAME={cur:g, done:false, luck1:!!(ECON.luck&1), luck2:!!(ECON.luck&2)};
+  ECON.luck=0; econSave(); econRender();
+  hide('ov-reward');
+  $('game-title').textContent=G_TITLES[g];
+  $('game-again').style.display='';
+  $('game-again').disabled = !ECON.devFree && ECON.tickets<1;
+  $('game-again').textContent = ECON.devFree ? '再玩一張 🎟（∞）' : '再玩一張 🎟（剩 '+ECON.tickets+'）';
+  show('ov-game');
+  ({scratch:gScratch,slot:gSlot,cards:gCards,wheel:gWheel,sil:gSil,tiles:gTiles})[g]();
+}
+function gameDone(html, good){
+  if(GAME) GAME.done=true;
+  $('game-area').insertAdjacentHTML('beforeend','<div class="g-done">'+html+'</div>');
+  const ga=$('game-again');
+  if(ga){ ga.style.display=''; ga.disabled = !ECON.devFree && (ECON.tickets||0)<1; ga.textContent = ECON.devFree ? '再玩一張 🎟（∞）' : '再玩一張 🎟（剩 '+(ECON.tickets||0)+'）'; }
+  if(good!==false){ confetti(); SFX.win(); } else { SFX.miss(); }
+}
+/* 🪙 刮刮樂：canvas 銀膜刮除，>50% 自動揭曉 */
+function gScratch(){
+  const pz=rollPrize();
+  const under = pz.type==='seed'
+    ? '<div style="font-size:30px">🌌 ×'+pz.n+'</div>'
+    : '<img src="'+pz.mon.img+'" style="width:76px;height:76px;object-fit:contain" alt=""><div style="font-size:16px">✨ '+pz.mon.name+'</div>';
+  $('game-area').innerHTML='<div id="scratch-wrap"><div id="scratch-under">'+under+'</div><canvas id="scratch-cv" width="260" height="150"></canvas></div><div class="g-note">刮開銀膜看看獎品！（刮一半自動揭曉）</div>';
+  const cv=$('scratch-cv');
+  const tok=GAME;
+  let revealed=false;
+  const reveal=()=>{ if(revealed || GAME!==tok) return; revealed=true; cv.style.display='none'; gameDone(awardPrize(pz)); };
+  const ctx = cv.getContext ? cv.getContext('2d') : null;
+  if(!ctx){ setTimeout(reveal,500); return; }
+  const gr=ctx.createLinearGradient(0,0,260,150);
+  gr.addColorStop(0,'#cfd6de'); gr.addColorStop(.5,'#aab4bf'); gr.addColorStop(1,'#8d99a6');
+  ctx.fillStyle=gr; ctx.fillRect(0,0,260,150);
+  ctx.fillStyle='#66727e'; ctx.font='bold 16px sans-serif'; ctx.textAlign='center';
+  ctx.fillText('🪙 刮這裡 🪙',130,82);
+  let down=false, moves=0;
+  const pt=e=>{ const r=cv.getBoundingClientRect(); return {x:(e.clientX-r.left)*(260/Math.max(1,r.width)), y:(e.clientY-r.top)*(150/Math.max(1,r.height))}; };
+  const scratchAt=e=>{
+    const p=pt(e);
+    ctx.globalCompositeOperation='destination-out';
+    ctx.beginPath(); ctx.arc(p.x,p.y,17,0,7); ctx.fill();
+    if(++moves%6===0){
+      const d=ctx.getImageData(0,0,260,150).data;
+      let clear=0, tot=0;
+      for(let k=3;k<d.length;k+=4*6){ tot++; if(d[k]<100) clear++; }
+      if(clear/tot>0.5) reveal();
+    }
+  };
+  cv.addEventListener('pointerdown',e=>{ down=true; scratchAt(e); });
+  cv.addEventListener('pointermove',e=>{ if(down) scratchAt(e); });
+  window.addEventListener('pointerup',()=>{ down=false; });
+}
+/* 🎰 拉霸機：三輪亂數滾動 → 定格中獎符號 */
+function gSlot(){
+  const pz=rollPrize();
+  const syms=['🌌','🍒','⭐','🍀','⚡','🎁'];
+  const finl=pz.type==='mon'?['🎁','🎁','🎁']:['🌌','🌌','🌌'];
+  let h='<div class="slot-wrap">';
+  for(let k=0;k<3;k++) h+='<div class="slot"><div class="reel" id="reel'+k+'">❔</div></div>';
+  h+='</div><div class="g-note">轉吧轉吧～</div>';
+  $('game-area').innerHTML=h;
+  const tok=GAME;
+  const iv=[0,1,2].map(k=>setInterval(()=>{ if(GAME!==tok){ clearInterval(iv[k]); return; } $('reel'+k).textContent=syms[Math.floor(Math.random()*syms.length)]; },70));
+  [700,1150,1600].forEach((t,k)=>setTimeout(()=>{ if(GAME!==tok) return; clearInterval(iv[k]); $('reel'+k).textContent=finl[k]; SFX.tap(); },t));
+  setTimeout(()=>{ if(GAME!==tok) return; gameDone(awardPrize(pz)); },2100);
+}
+/* 🃏 翻牌抽卡：五選二，2~3 張藏獎 */
+function gCards(){
+  const nP=Math.random()<0.4?3:2;
+  const prizes=[];
+  for(let k=0;k<nP;k++) prizes.push(rollPrize({monC:0.08}));
+  while(prizes.length<5) prizes.push(null);
+  for(let k=prizes.length-1;k>0;k--){ const j=Math.floor(Math.random()*(k+1)); const t=prizes[k]; prizes[k]=prizes[j]; prizes[j]=t; }
+  const flipped=[]; let ended=false;
+  const tok=GAME;
+  let h='<div class="cards5">';
+  for(let k=0;k<5;k++) h+='<div class="pcard" data-k="'+k+'"><div class="back">❓</div><div class="front"></div></div>';
+  h+='</div><div class="g-note">五張牌翻兩張，看看藏了什麼！</div>';
+  $('game-area').innerHTML=h;
+  $('game-area').querySelectorAll('.pcard').forEach(el=>{
+    el.onclick=()=>{
+      const k=+el.dataset.k;
+      if(ended || GAME.done || flipped.includes(k) || flipped.length>=2) return;
+      flipped.push(k);
+      el.classList.add('flip');
+      const pz=prizes[k], fr=el.querySelector('.front');
+      if(pz){
+        fr.innerHTML = pz.type==='seed' ? '<span style="font-size:24px">🌌×'+pz.n+'</span>' : '<img src="'+pz.mon.img+'" alt=""><span>'+pz.mon.name+'</span>';
+        SFX.tap();
+      } else {
+        el.classList.add('dud');
+        fr.innerHTML='<span style="font-size:26px">💨</span><span>落空</span>';
+        SFX.untap();
+      }
+      if(flipped.length>=2){
+        ended=true;
+        setTimeout(()=>{
+          if(GAME!==tok) return;
+          let html='', any=false;
+          flipped.forEach(k2=>{ if(prizes[k2]){ html+=awardPrize(prizes[k2]); any=true; } });
+          if(!any) html='<div class="g-prize">💨 兩張都落空…<span class="g-sub">下次會更好運！</span></div>';
+          gameDone(html, any);
+        },700);
+      }
+    };
+  });
+}
+/* 🎡 幸運輪盤：八格 conic-gradient + 旋轉定格 */
+function gWheel(){
+  const segs=[{t:'🌌1',n:1},{t:'🌌2',n:2},{t:'🌌3',n:3},{t:'🌌1',n:1},{t:'🌌2',n:2},{t:'🌌5',n:5},{t:'✨',mon:true},{t:'🌌1',n:1}];
+  let pick, pz;
+  if(((GAME&&GAME.luck2)||Math.random()<0.16) && prizeMonPool().length){
+    if(GAME) GAME.luck2=false;
+    pick=6; pz={type:'mon', mon:rollMon()};
+  } else {
+    const order=[0,1,2,3,4,5,7];
+    pick=wpick(order, i=>[3,2,1.2,3,2,.5,3][i]);
+    let n=segs[pick].n;
+    if(GAME && GAME.luck1){ n+=1; GAME.luck1=false; }
+    pz={type:'seed', n:n};
+  }
+  const colors=['#ffe3d3','#fff8ef','#ffd9c2','#fff8ef','#ffe3d3','#fff8ef','#ffd166','#fff8ef'];
+  let h='<div class="wheel-wrap"><div class="wheel-ptr">🔻</div><div id="wheel-disc"></div></div><div class="g-note">按下轉盤拼好運！✨ 格有機會是@@mon@@</div><div class="btns" style="justify-content:center"><button class="btn btn-primary" id="wheel-go">轉！🎡</button></div>';
+  $('game-area').innerHTML=h;
+  const disc=$('wheel-disc');
+  const seg=360/8, conic=[];
+  for(let k=0;k<8;k++) conic.push(colors[k]+' '+(k*seg)+'deg '+((k+1)*seg)+'deg');
+  disc.style.background='conic-gradient('+conic.join(',')+')';
+  for(let k=0;k<8;k++){
+    const lab=document.createElement('div');
+    lab.className='wlab'; lab.textContent=segs[k].t;
+    lab.style.transform='translate(-50%,-50%) rotate('+(k*seg+seg/2)+'deg) translateY(-88px)';
+    disc.appendChild(lab);
+  }
+  let spun=false;
+  const tok=GAME;
+  $('wheel-go').onclick=()=>{
+    if(spun || (GAME&&GAME.done)) return;
+    spun=true; SFX.tap();
+    const center=pick*seg+seg/2;
+    disc.style.transform='rotate('+(360*5+360-center)+'deg)';
+    let fin=false;
+    const done=()=>{ if(fin || GAME!==tok) return; fin=true; gameDone(awardPrize(pz)); };
+    disc.addEventListener('transitionend',done,{once:true});
+    setTimeout(done,3900);
+  };
+}
+/* 👤 猜剪影：猜對直接帶走遠古/神話 */
+function gSil(){
+  let pool=prizeMonPool().filter(p=>rarityOf(p.id)>=2);
+  if(!pool.length) pool=prizeMonPool();
+  if(!pool.length){ gameDone(awardPrize({type:'seed',n:2})); return; }
+  const m=wpick(pool, p=>[1,2,4][rarityOf(p.id)-1]||1);
+  const opts=[{n:m.name,ok:true}];
+  const others=allMons().filter(p=>p.id!==m.id);
+  let guard=0;
+  while(opts.length<4 && guard++<500){
+    const o=others[Math.floor(Math.random()*others.length)];
+    if(!opts.find(x=>x.n===o.name)) opts.push({n:o.name,ok:false});
+  }
+  for(let k=opts.length-1;k>0;k--){ const j=Math.floor(Math.random()*(k+1)); const t=opts[k]; opts[k]=opts[j]; opts[j]=t; }
+  let h='<img class="sil" src="'+m.img+'" alt="?"><div class="g-note">這是誰的剪影？猜對直接帶走牠！</div><div class="opts4">';
+  opts.forEach((o,k)=>h+='<button class="opt4" data-k="'+k+'">'+o.n+'</button>');
+  h+='</div>';
+  $('game-area').innerHTML=h;
+  let answered=false;
+  $('game-area').querySelectorAll('.opt4').forEach(b=>{
+    b.onclick=()=>{
+      if(answered) return; answered=true;
+      const o=opts[+b.dataset.k];
+      if(o.ok){
+        b.style.borderColor='#06d6a0'; b.style.color='#06a57d'; b.style.fontWeight='900';
+        gameDone(awardPrize({type:'mon',mon:m}));
+      } else {
+        b.style.borderColor='#d64545'; b.style.color='#d64545';
+        ECON.seeds=(ECON.seeds||0)+1; econSave(); econRender();
+        gameDone('<div class="g-prize">正確答案是 <b>'+m.name+'</b><span class="g-sub">沒猜中…安慰獎 🌌×1</span></div>',false);
+      }
+    };
+  });
+}
+/* ⛏ 尋寶九宮格：翻格累積種子，⚡ 歸零，最多 3 格 */
+function gTiles(){
+  const vals=[1,1,1,1,1,2,2,'zap','zap'];
+  for(let k=vals.length-1;k>0;k--){ const j=Math.floor(Math.random()*(k+1)); const t=vals[k]; vals[k]=vals[j]; vals[j]=t; }
+  let bank=0, flips=0, ended=false;
+  let h='<div class="gbank" id="tile-bank">目前 🌌 ×0</div><div class="tiles9">';
+  for(let k=0;k<9;k++) h+='<div class="tile9" data-k="'+k+'">⛏</div>';
+  h+='</div><div class="btns" style="justify-content:center"><button class="btn btn-primary" id="tile-stop" style="display:none">收手領取 💰</button></div><div class="g-note">翻開寶藏格累積種子；翻到 ⚡ 全部溜走！最多翻 3 格</div>';
+  $('game-area').innerHTML=h;
+  const upd=()=>{ $('tile-bank').textContent='目前 🌌 ×'+bank; };
+  const tok=GAME;
+  $('game-area').querySelectorAll('.tile9').forEach(el=>{
+    el.onclick=()=>{
+      const k=+el.dataset.k;
+      if(ended || GAME.done || el.classList.contains('open')) return;
+      el.classList.add('open');
+      const v=vals[k];
+      if(v==='zap'){
+        ended=true;
+        el.classList.add('bad'); el.textContent='⚡';
+        bank=0; upd();
+        $('tile-stop').style.display='none';
+        gameDone('<div class="g-prize">⚡ 觸電了！<span class="g-sub">種子全部溜走…</span></div>',false);
+      } else {
+        bank+=v; flips++; upd();
+        el.textContent='🌌'+(v>1?'×'+v:'');
+        SFX.tap();
+        if(flips>=3){
+          ended=true;
+          $('tile-stop').style.display='none';
+          setTimeout(()=>{ if(GAME!==tok) return; gameDone(awardPrize({type:'seed',n:bank})); },450);
+        } else {
+          $('tile-stop').style.display='';
+        }
+      }
+    };
+  });
+  $('tile-stop').onclick=()=>{
+    if(ended || bank<=0) return;
+    ended=true;
+    gameDone(awardPrize({type:'seed',n:bank}));
+  };
+}
+
+/* 獎勵中心開關 */
+$('menu-reward').onclick=()=>{ econRender(); show('ov-reward'); SFX.tap(); };
+$('reward-close').onclick=()=>hide('ov-reward');
+document.querySelectorAll('#reward-games .rg-btn').forEach(b=>{ b.onclick=()=>startGame(b.dataset.g); });
+$('game-back').onclick=()=>{ hide('ov-game'); GAME=null; econRender(); show('ov-reward'); };
+$('game-again').onclick=()=>{ if(GAME) startGame(GAME.cur); };
+
+/* ---------- 控制按鈕 ---------- */
+$('btn-clear').onclick = ()=>{
+  if(!G || G.state!=='marking' || G.tutorial) return;
+  G.cells.forEach((c,i)=>{ c.mark=''; cellEls[i].classList.remove('x'); });
+  updateCounts(); updateStatus();
+};
+let hintBusy=false;
+function spawnCatchText(el, isFive){
+  const s=document.createElement('span');
+  s.className='newcatch'+(isFive?' five':'');
+  s.textContent = isFive ? '★★★★★ 王者降臨!' : '新捕獲!';
+  el.appendChild(s);
+  setTimeout(()=>s.remove(), isFive?3600:1250);
+}
+$('btn-ball').onclick = ()=>{
+  if(!G || G.state!=='marking' || G.balls<=0) return;
+  if(TUT.expect){
+    if(TUT.expect.type==='ballbtn'){ const f=TUT.expect.fn; clearExpect(); f(); }
+    else tutNudge();
+    return;
+  }
+  setBallMode(!G.ballMode);
+  SFX.ball();
+};
+function updateHintBtn(){
+  const b=$('btn-hint'); if(!b) return;
+  const freeLeft = G && G.state==='marking' && !G.hintFreeUsed;
+  const can = G && G.state==='marking' && !G.tutorial && (ECON.devFree||(ECON.seeds||0)>0||freeLeft) && !hintBusy;
+  b.disabled = !can;
+  b.textContent = '提示 🌿 '+(ECON.devFree?'🌌∞':(freeLeft?'(本關免費1次) 🌌'+(ECON.seeds||0):'🌌'+(ECON.seeds||0)));
+}
+function freeHint(){ /* 種子提示／技能提示共用：免費、不扣時間 */
+  if(!G || G.state!=='marking') return null;
+  const cands=[...G.cats].filter(i=>!G.cells[i].revealed);
+  if(!cands.length) return null;
+  const xCats=cands.filter(i=>G.cells[i].mark==='x');
+  const unmarked=cands.filter(i=>!G.cells[i].mark);
+  const hp = xCats.length?xCats:(unmarked.length?unmarked:cands);
+  return hp[Math.floor(Math.random()*hp.length)];
+}
+function showHintAt(i){
+  SFX.hint();
+  hintBusy=true;
+  updateHintBtn();
+  const g=document.createElement('div');
+  g.className='grass';
+  g.innerHTML='<i>🌿</i><i>🌿</i><i>🌿</i><i>🌿</i><i>🌿</i>';
+  cellEls[i].appendChild(g);
+  setTimeout(()=>{ g.remove(); hintBusy=false; updateHintBtn(); }, 3000);
+}
+$('btn-giveup').onclick = ()=>{
+  if(!G) return;
+  if(!confirm('放棄這一局？')) return;
+  ECON.streak=0; econSave();
+  G.state='done'; timerStop(); stopBuddyTimers();
+  hide('ov-loading'); hide('ov-genfail');
+  refreshBest(); show('ov-menu'); SFX.tap();
+};
+$('btn-restart').onclick = ()=>{
+  if(!G) return;
+  if(!confirm('重新開始這一局？')) return;
+  const n=G.N; G.state='done'; timerStop(); stopBuddyTimers();
+  hide('ov-loading'); hide('ov-genfail');
+  newRun(n); SFX.tap();
+};
+$('btn-hint').onclick = ()=>{
+  if(!G || G.state!=='marking' || G.tutorial || hintBusy) return;
+  const useFree = !ECON.devFree && (ECON.seeds||0)<1 && !G.hintFreeUsed;
+  if(!ECON.devFree && !useFree && (ECON.seeds||0)<1){ SFX.wrong(); floatText($('btn-hint'),'需要 1 顆星願種子 🌌','#d64545'); return; }
+  const i=freeHint();
+  if(i===null) return;
+  if(useFree){ G.hintFreeUsed=true; floatText($('btn-hint'),'本關免費提示已用 ✓','#06a57d'); }
+  else if(!ECON.devFree){ ECON.seeds--; }
+  econSave(); econRender();
+  showHintAt(i);
+  const g=document.createElement('div');
+  g.className='grass';
+  g.innerHTML='<i>🌿</i><i>🌿</i><i>🌿</i><i>🌿</i><i>🌿</i>';
+  cellEls[i].appendChild(g);
+  setTimeout(()=>{ g.remove(); hintBusy=false; }, 3000);
+};
+
+function checkBallEnd(){
+  if(G.found>=G.N){ G.state='ending'; timerStop(); setTimeout(winRound,850); return true; }
+  if(G.balls<=0){ G.state='ending'; timerStop(); setTimeout(failRound,850); return true; }
+  return false;
+}
+
+function winRound(){
+  G.state='done'; G.lastFail=false;
+  timerStop();
+  SFX.win(); confetti();
+  $('res-emoji').textContent='🏆';
+  $('res-title').textContent='過關！';
+  if(G.tutorial){
+    tutHide();
+    $('res-sub').textContent = G.tutorial==='demo'
+      ? '流程就是：✕ 排除 → 鎖定唯一候選 → 丟球捕獲。換你上場！'
+      : '你已經獨立完成一局，規則都學會了！6×6 起加入沙漏計時：每抓一隻 +30 秒！';
+    let bd='';
+    bd+=row('🎯 捕獲@@mon@@', G.found+' / '+G.N, '', '');
+    $('res-breakdown').innerHTML=bd;
+    if(G.tutorial==='demo'){ G.nextMode='guided5'; $('res-next').textContent='去 5×5 引導 ▶'; }
+    else { G.nextMode='size6'; $('res-next').textContent='去 6×6 挑戰 ▶'; }
+    $('res-lv').style.display='none';
+    show('ov-result');
+    return;
+  }
+  ECON.tickets=(ECON.tickets||0)+1; econSave(); econRender();
+  const sc=Math.max(0, Math.floor(TIMER.left));
+  const rec=lvRec(G.N);
+  rec.best=Math.max(rec.best||0, sc);
+  rec.total=(rec.total||0)+sc;
+  LV[String(G.N)]=rec;
+  lvSave();
+  updateHUD(); renderLV();
+  $('res-sub').textContent='剩餘 '+fmtSec(sc)+' 全部換算成你的分數！';
+  let bd='';
+  bd+=row('🎯 捕獲@@mon@@', G.found+' / '+G.N, '', '');
+  bd+=row('🎟 獎勵券', '+1', '累積 '+ECON.tickets+' 張', 'pos');
+  bd+=row('⏳ 剩餘秒數', sc+' 秒', '+'+sc, 'pos');
+  bd+=row('⏱ LV'+G.N+' 個人累積', rec.total, '', '');
+  bd+='<div class="row" style="border-top:1px dashed #ddd0ba;margin-top:6px;padding-top:6px"><span><b>個人總分</b></span><span><b>'+fmtSec(lvTotal())+'</b></span></div>';
+  $('res-breakdown').innerHTML=bd;
+  $('res-next').textContent='下一局 ▶';
+  setupResSel();
+  show('ov-result');
+}
+
+function failRound(){
+  G.state='done'; G.lastFail=true;
+  ECON.streak=0; econSave();
+  timerStop();
+  G.cells.forEach((c,i)=>{ if(c.cat && !c.revealed) cellEls[i].classList.add('ghost'); });
+  SFX.fail();
+  const left = G.N-G.found;
+  $('res-emoji').textContent='😿';
+  $('res-title').textContent='遊戲結束';
+  $('res-sub').textContent='@@ball_name@@用完了，還有 '+left+' 隻@@mon@@沒找到（位置已揭示）';
+  let bd='';
+  bd+=row('🎯 捕獲@@mon@@', G.found+' / '+G.N, '+0', '');
+  bd+='<div class="row" style="border-top:1px dashed #ddd0ba;margin-top:6px;padding-top:6px"><span><b>個人總分</b></span><span><b>'+fmtSec(lvTotal())+'</b></span></div>';
+  $('res-breakdown').innerHTML=bd;
+  $('res-next').textContent='再挑戰一局';
+  setupResSel();
+  show('ov-result');
+}
+
+function row(a,b,c,cls){ return '<div class="row"><span>'+a+'（'+b+'）</span><span class="'+cls+'">'+c+'</span></div>'; }
+
+$('res-next').onclick = ()=>{
+  hide('ov-result');
+  if(G.nextMode==='guided5'){ newRun(5); return; }
+  if(G.nextMode==='size6'){ newRun(6); return; }
+  if(G.lastFail){ G.round=1; } else { G.round++; }
+  newBoard();
+  startBuddyTimers();
+};
+$('res-menu').onclick = ()=>{ hide('ov-result'); refreshBest(); show('ov-menu'); };
+$('res-reward').onclick = ()=>{ hide('ov-result'); econRender(); show('ov-reward'); SFX.tap(); };
+$('res-rest').onclick = ()=>{
+  hide('ov-result');
+  timerStop();
+  $('rest-sub').innerHTML = '個人總分 <b>'+lvTotal()+'</b> · 圖鑑收藏 <b>'+dexGot.size+' / '+allMons().length+'</b> · 星願種子 <b>🌌'+(ECON.devFree?'∞':(ECON.seeds||0))+'</b><br>明天再來挑戰！';
+  show('ov-rest');
+  SFX.win();
+};
+$('rest-menu').onclick = ()=>{ hide('ov-rest'); refreshBest(); show('ov-menu'); };
+function setupResSel(){
+  const sel=$('res-lv');
+  sel.innerHTML='';
+  const names={6:'新手',7:'新手',8:'新手',9:'學徒',10:'學徒',11:'大師',12:'菁英',13:'傳奇',14:'神話'};
+  for(let n=6;n<=14;n++){
+    const o=document.createElement('option');
+    o.value=n; o.textContent='LV'+n+' · '+names[n]+' ⏱'+n+':00';
+    if(G && G.N===n) o.selected=true;
+    sel.appendChild(o);
+  }
+  sel.style.display='';
+}
+$('res-lv').addEventListener('change', ()=>{ hide('ov-result'); newRun(+$('res-lv').value); });
+$('genfail-retry').onclick = ()=>{ hide('ov-genfail'); newBoard(); };
+$('genfail-menu').onclick = ()=>{ hide('ov-genfail'); refreshBest(); show('ov-menu'); };
+
+/* ---------- 教學引擎 ---------- */
+function tutShow(html, btnLabel){
+  $('tut-text').innerHTML = html;
+  const b=$('tut-btn');
+  if(btnLabel){ b.style.display=''; b.textContent=btnLabel; } else b.style.display='none';
+  $('tutbar').classList.add('show');
+}
+function tutHide(){
+  $('tutbar').classList.remove('show');
+  clearExpect();
+}
+let tutRings=[];
+function tutRing(cells){
+  (Array.isArray(cells)?cells:[cells]).forEach(i=>{
+    cellEls[i].classList.add('tut-ring');
+    tutRings.push(i);
+  });
+}
+function tutClearRings(){
+  tutRings.forEach(i=>{ if(cellEls[i]) cellEls[i].classList.remove('tut-ring'); });
+  tutRings=[];
+  $('board').classList.remove('tut-focus');
+  $('btn-ball').classList.remove('tut-btn-ring');
+}
+function tutFocus(on){ $('board').classList.toggle('tut-focus', !!on); }
+function clearExpect(){
+  TUT.expect=null;
+  tutClearRings();
+  tutFocus(false);
+}
+function tutNudge(){
+  SFX.tap();
+  const t=$('tut-text');
+  t.classList.remove('tut-wiggle'); void t.offsetWidth; t.classList.add('tut-wiggle');
+}
+function waitBtn(){
+  return new Promise(res=>{
+    $('tut-btn').onclick = ()=>{ $('tut-btn').onclick=null; res(); };
+  });
+}
+function waitCells(cells){ /* 等玩家把指定格全部 ✕（任一順序），走正常點擊流程 */
+  return new Promise(res=>{
+    const set=new Set(cells);
+    const handler=(i)=>{
+      markToggle(i);
+      set.delete(i);
+      if(!set.size){ clearExpect(); res(); }
+      else {
+        tutClearRings(); tutRing([...set]); tutFocus(true);
+        TUT.expect={ type:'cell', cells:set, fn:handler };
+      }
+    };
+    TUT.expect={ type:'cell', cells:set, fn:handler };
+    tutRing([...set]); tutFocus(true);
+  });
+}
+function waitCellClick(cells){
+  return new Promise(res=>{
+    TUT.expect={ type:'cell', cells:new Set(Array.isArray(cells)?cells:[cells]), fn:(i)=>res(i) };
+    tutRing(cells); tutFocus(true);
+  });
+}
+function waitBall(on){
+  return new Promise(res=>{
+    TUT.expect={ type:'ballbtn', fn:()=>{ setBallMode(on); res(); } };
+    $('btn-ball').classList.add('tut-btn-ring');
+    tutFocus(true);
+  });
+}
+function demoMark(i){ /* 自動 ✕ */
+  const c=G.cells[i];
+  if(c.mark==='x'||c.revealed) return;
+  c.mark='x';
+  cellEls[i].classList.add('x','autoflash');
+  setTimeout(()=>cellEls[i].classList.remove('autoflash'),450);
+  SFX.tap();
+  updateStatus();
+}
+function demoAlive(){ return G && G.tutorial && G.state!=='done'; }
+
+function findForced(){ /* 找「真的可推理」的下一隻 */
+  const N=G.N;
+  const caught=[]; G.cells.forEach((c,i)=>{ if(c.revealed) caught.push(i); });
+  const banned=new Set();
+  caught.forEach(ci=>neighbors8(ci,N).forEach(nb=>banned.add(nb)));
+  const isCand=i=>!G.cells[i].mark && !G.cells[i].revealed && !banned.has(i);
+  const stars=[]; G.cells.forEach((c,i)=>{ if(c.cat && !c.revealed) stars.push(i); });
+  for(const s of stars){
+    const r=Math.floor(s/N), c=s%N, rg=G.cells[s].region;
+    let rowC=0,colC=0,regC=0, rowOk=false,colOk=false,regOk=false;
+    for(let i=r*N;i<r*N+N;i++) if(isCand(i)){ rowC++; if(i===s) rowOk=true; }
+    for(let i=c;i<N*N;i+=N) if(isCand(i)){ colC++; if(i===s) colOk=true; }
+    for(let i=0;i<N*N;i++) if(G.cells[i].region===rg && isCand(i)){ regC++; if(i===s) regOk=true; }
+    if(rowC===1&&rowOk) return {cell:s, why:'第'+(r+1)+'列'};
+    if(colC===1&&colOk) return {cell:s, why:'第'+(c+1)+'欄'};
+    if(regC===1&&regOk) return {cell:s, why:'這個顏色區塊'};
+  }
+  return null;
+}
+
+async function demoEliminate(star, gap){
+  const N=G.N, r=Math.floor(star/N), c=star%N;
+  tutShow('接著推理：牠在第 <b>'+(r+1)+' 列</b> → 這列其他格不可能有 → ✕');
+  for(let i=r*N;i<r*N+N;i++){ if(i!==star){ demoMark(i); await sleep(gap); } }
+  if(!demoAlive()) return;
+  tutShow('第 <b>'+(c+1)+' 欄</b>也一樣 ✕');
+  for(let i=c;i<N*N;i+=N){ if(i!==star){ demoMark(i); await sleep(gap); } }
+  if(!demoAlive()) return;
+  const rg=G.cells[star].region;
+  const regCells=[]; G.cells.forEach((cc,idx)=>{ if(cc.region===rg && idx!==star && cc.mark!=='x') regCells.push(idx); });
+  if(regCells.length){
+    tutShow('牠的<b>顏色區塊</b>裡也不會有第二隻 ✕');
+    for(const i of regCells){ demoMark(i); await sleep(gap); }
+  }
+}
+
+async function startDemo(){
+  const tk=++demoToken;
+  const ok=()=>tk===demoToken && G && G.tutorial==='demo' && G.state!=='done';
+  G.state='demo';
+  const N=G.N;
+  const D=2000; /* 每個主步驟間隔 2 秒 */
+  await sleep(600); if(!ok()) return;
+  tutShow('歡迎來到 Pikadoku 🎬 我先示範一局，你看著！');
+  await sleep(D); if(!ok()) return;
+  tutShow('盤面分成 <b>'+N+' 個顏色區塊</b>，每區剛好藏 <b>1 隻</b>@@mon@@');
+  for(let rg=0; rg<N; rg++){
+    tutClearRings();
+    const cells=[]; G.cells.forEach((c,i)=>{ if(c.region===rg) cells.push(i); });
+    tutRing(cells);
+    await sleep(D); if(!ok()) return;
+  }
+  tutClearRings();
+  tutShow('每條<b>橫列</b>也各剛好 1 隻');
+  tutRing([...Array(N).keys()]);
+  await sleep(D); if(!ok()) return;
+  tutClearRings();
+  tutShow('每條<b>直欄</b>也一樣');
+  tutRing([...Array(N).keys()].map(r=>r*N));
+  await sleep(D); if(!ok()) return;
+  tutClearRings();
+  tutShow('而且@@mon@@<b>絕不互相接觸</b>——連斜角都不行！');
+  await sleep(D); if(!ok()) return;
+
+  const stars=[...G.cats].sort((a,b)=>a-b);
+  const s1=stars[0];
+  tutShow('答案先偷偷告訴你：發光這格有一隻！<br>牠周圍 <b>8 格</b>（含斜角）都不可能有 → 全部打 ✕');
+  tutRing(s1); tutFocus(true);
+  await sleep(D); if(!ok()) return;
+  for(const nb of neighbors8(s1,N).sort((a,b)=>a-b)){
+    demoMark(nb); await sleep(500); if(!ok()) return;
+  }
+  await sleep(800); if(!ok()) return;
+  tutShow('排除完成，鎖定目標——丟<b>@@ball_name@@</b>！');
+  setBallMode(true);
+  SFX.ball();
+  await sleep(D); if(!ok()) return;
+  tutClearRings(); tutRing(s1);
+  doBall(s1);
+  await sleep(D); if(!ok()) return;
+  tutShow('🐱 捕獲成功！還會登錄到圖鑑！');
+  await sleep(D); if(!ok()) return;
+  await demoEliminate(s1, 420); if(!ok()) return;
+  await sleep(600); if(!ok()) return;
+
+  const f2=findForced();
+  tutShow(f2 ? '看！<b>'+f2.why+'</b>只剩這格沒被 ✕ → 牠<b>鐵定在這</b>！丟球！'
+             : '候選格變少了！教學直接告訴你：這格有一隻，丟球！');
+  if(!G.ballMode) setBallMode(true);
+  const s2=stars[1];
+  tutClearRings(); tutRing(s2);
+  await sleep(D); if(!ok()) return;
+  doBall(s2);
+  await sleep(D); if(!ok()) return;
+  await demoEliminate(s2, 300); if(!ok()) return;
+  await sleep(600); if(!ok()) return;
+
+  for(let k=2;k<stars.length;k++){
+    const f=findForced();
+    tutShow(f ? '<b>'+f.why+'</b>只剩一個候選格 → 丟球！' : '如法炮製——丟球！');
+    if(!G.ballMode) setBallMode(true);
+    tutClearRings(); tutRing(stars[k]);
+    await sleep(D); if(!ok()) return;
+    doBall(stars[k]);
+    await sleep(D); if(!ok()) return;
+    if(k<stars.length-1){ await demoEliminate(stars[k], 240); if(!ok()) return; }
+  }
+  tutHide();
+}
+
+async function startGuided(){
+  const tk=++demoToken;
+  const ok=()=>tk===demoToken && G && G.tutorial==='guided';
+  const N=G.N;
+  await sleep(400); if(!ok()) return;
+  tutShow('換你上場！這局有 <b>'+N+' 隻</b>@@mon@@，跟著金色發光提示走 🙌', '開始！');
+  await waitBtn(); if(!ok()) return;
+
+  const stars=[...G.cats].sort((a,b)=>a-b);
+  const s1=stars[0];
+
+  const safe=neighbors8(s1,N)[0];
+  tutShow('先熟悉操作：點發光那格<b>打 ✕</b><br>（它緊貼等下的獵物，確定沒有@@mon@@）');
+  await waitCellClick([safe]); if(!ok()) return;
+  await sleep(350); if(!ok()) return;
+  tutShow('再點一次可以<b>取消 ✕</b>，試試看！');
+  await waitCellClick([safe]); if(!ok()) return;
+  await sleep(350); if(!ok()) return;
+  tutShow('很好！再<b>打回 ✕</b>（確定沒有，就標起來）');
+  await waitCellClick([safe]); if(!ok()) return;
+  await sleep(400); if(!ok()) return;
+
+  tutShow('該你了：點下面的 <b>@@ball_name@@</b> 按鈕切換模式');
+  await waitBall(true); if(!ok()) return;
+  SFX.ball();
+  tutShow('游標變@@ball_name@@了！教學偷偷報料——發光那格有一隻，<b>點牠丟球</b>！');
+  await waitCellClick([s1]); if(!ok()) return;
+  doBall(s1);
+  await sleep(1900); if(!ok()) return;
+
+  const r1=Math.floor(s1/N), c1=s1%N;
+  tutShow('🎉 第一次捕獲！接著推理：牠在第 <b>'+(r1+1)+' 列</b> → 這列其他格都沒有。<br>先切回一般模式：再點一下<b>@@ball_name@@</b>按鈕');
+  await waitBall(false); if(!ok()) return;
+  SFX.ball();
+  const rowCells=[]; for(let i=r1*N;i<r1*N+N;i++) if(i!==s1 && G.cells[i].mark!=='x') rowCells.push(i);
+  tutShow('把<b>第 '+(r1+1)+' 列</b>剩下的格子全部 ✕（任一順序）');
+  await waitCells(rowCells); if(!ok()) return;
+  await sleep(350); if(!ok()) return;
+  const colCells=[]; for(let i=c1;i<N*N;i+=N) if(i!==s1 && G.cells[i].mark!=='x') colCells.push(i);
+  tutShow('<b>第 '+(c1+1)+' 欄</b>也一樣 ✕');
+  await waitCells(colCells); if(!ok()) return;
+  await sleep(350); if(!ok()) return;
+  const diagCells=neighbors8(s1,N).filter(i=>Math.floor(i/N)!==r1 && i%N!==c1 && G.cells[i].mark!=='x');
+  if(diagCells.length){
+    tutShow('別忘<b>斜角</b>！這 '+diagCells.length+' 格也不可能有人 ✕');
+    await waitCells(diagCells); if(!ok()) return;
+    await sleep(300); if(!ok()) return;
+  }
+  const rg1=G.cells[s1].region;
+  const regRest=[]; G.cells.forEach((c,i)=>{ if(c.region===rg1 && i!==s1 && c.mark!=='x') regRest.push(i); });
+  if(regRest.length){
+    tutShow('牠的<b>顏色區塊</b>不會有第二隻——這幾格我幫你標 ✕');
+    for(const i of regRest){ demoMark(i); await sleep(130); if(!ok()) return; }
+    await sleep(500); if(!ok()) return;
+  }
+
+  for(let k=1;k<stars.length;k++){
+    const f=findForced();
+    if(!G.ballMode){
+      tutShow(f ? '看！<b>'+f.why+'</b>只剩一個候選格！先切到<b>@@ball_name@@</b>' : '下一隻在發光那格！先切到<b>@@ball_name@@</b>');
+      await waitBall(true); if(!ok()) return;
+      SFX.ball();
+    }
+    tutShow(f ? '<b>'+f.why+'</b>只剩這格沒被 ✕ → 牠鐵定在這，<b>丟球！</b>'
+               : '教學提示：發光那格有一隻，<b>丟球！</b>');
+    await waitCellClick([stars[k]]); if(!ok()) return;
+    doBall(stars[k]);
+    await sleep(1900); if(!ok()) return;
+    if(k<stars.length-1){
+      tutShow('我幫你把相關格子 ✕ 起來…');
+      const rg=G.cells[stars[k]].region;
+      const rk=Math.floor(stars[k]/N), ck=stars[k]%N;
+      const todo=[]; G.cells.forEach((c,i)=>{
+        if(c.mark==='x'||c.revealed) return;
+        if(Math.floor(i/N)===rk||i%N===ck||c.region===rg||neighbors8(stars[k],N).includes(i)) todo.push(i);
+      });
+      for(const i of todo){ demoMark(i); await sleep(70); if(!ok()) return; }
+      await sleep(400); if(!ok()) return;
+    }
+  }
+  tutHide();
+}
+
+$('tut-skip').onclick = ()=>{
+  demoToken++;
+  clearExpect();
+  tutHide();
+  if(G){ G.state='done'; timerStop(); }
+  refreshBest();
+  show('ov-menu');
+};
+
+/* ---------- 其他 UI ---------- */
+function show(id){ $(id).classList.add('show'); }
+function hide(id){ $(id).classList.remove('show'); }
+function floatText(el, text, color){
+  const s=document.createElement('span');
+  s.className='float'; s.textContent=text; s.style.color=color;
+  el.appendChild(s);
+  setTimeout(()=>s.remove(),1150);
+}
+function confetti(){
+  const colors=['#ff9d5c','#ffd166','#06d6a0','#118ab2','#ef476f','#c77dff'];
+  for(let k=0;k<40;k++){
+    const d=document.createElement('i');
+    d.className='cf';
+    d.style.left = Math.random()*100+'vw';
+    d.style.background = colors[k%colors.length];
+    d.style.width = d.style.height = (6+Math.random()*8)+'px';
+    d.style.animationDuration = (1.6+Math.random()*1.4)+'s';
+    d.style.animationDelay = (Math.random()*0.5)+'s';
+    document.body.appendChild(d);
+    setTimeout(()=>d.remove(),3600);
+  }
+}
+function refreshBest(){
+  const t=lvTotal();
+  $('best-line').textContent = t>0 ? ('⏱ 個人總分：'+t+' · 🌌 種子 '+(ECON.seeds||0)+' · 🎟 券 '+(ECON.tickets||0)) : '🌌 種子 '+(ECON.seeds||0)+' · 🎟 券 '+(ECON.tickets||0);
+}
+
+document.querySelectorAll('.size-btn').forEach(b=>{
+  b.onclick = ()=>{ hide('ov-menu'); newRun(+b.dataset.n); };
+});
+$('btn-help').onclick = ()=>show('ov-help');
+$('menu-help').onclick = ()=>show('ov-help');
+$('help-ok').onclick = ()=>hide('ov-help');
+$('btn-sound').onclick = ()=>{
+  soundOn = !soundOn;
+  LS.set(@@LS_sound@@, soundOn?'1':'0');
+  $('btn-sound').textContent = soundOn?'🔊':'🔇';
+};
+$('btn-sound').textContent = soundOn?'🔊':'🔇';
+
+/* ---------- 啟動 ---------- */
+poolInit();
+setInterval(poolRefill, 2600);
+renderHearts();
+refreshBest();
+renderDex();
+renderLV();
+econRender();
+evalLock();
+/* 初始渲染 */ renderBuddy();

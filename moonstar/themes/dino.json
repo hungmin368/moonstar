@@ -1,0 +1,33 @@
+{
+ "name": "dino",
+ "output": "/home/node/.openclaw/workspace/Dinodoku-1.0.html",
+ "strings": {
+  "page_title": "Dinodoku 龍之數讀 — 恐龍解謎",
+  "game_title": "Dinodoku 龍之數讀",
+  "menu_sub": "數獨邏輯 × 踩地雷 × 收集養成 · 4×4 ~ 14×14 · 恐龍版 v1.0",
+  "dex_title": "恐龍圖鑑",
+  "legend_name": "遠古王者",
+  "tab_gen": "常見 151",
+  "mon": "恐龍",
+  "ball_name": "捕捉器",
+  "buddy_mon": "小龍",
+  "RARITY_NAMES": "['⭐','⭐⭐','⭐⭐⭐','⭐⭐⭐⭐','⭐⭐⭐⭐⭐']",
+  "RARITY_BADGE": "['🟢','🔵','🟣','🟠','💠']"
+ },
+ "ls": {
+  "dex": "dinodoku-dex",
+  "sound": "dinodoku-sound",
+  "lv": "dinodoku-lv",
+  "lock": "dinodoku-lock",
+  "econ": "dinodoku-econ",
+  "skills": "dinodoku-skills",
+  "buddy": "dinodoku-buddy",
+  "friend": "dinodoku-friend",
+  "friend2": "dinodoku-friend2",
+  "story": "dinodoku-story"
+ },
+ "ball_svg": "<svg width=\"15\" height=\"15\" viewBox=\"0 0 32 32\" style=\"vertical-align:-2px\"><defs><radialGradient id=\"cgA\" cx=\".35\" cy=\".3\" r=\".9\"><stop offset=\"0\" stop-color=\"#ffd180\"/><stop offset=\"1\" stop-color=\"#e65100\"/></radialGradient><radialGradient id=\"cgB\" cx=\".35\" cy=\".75\" r=\".9\"><stop offset=\"0\" stop-color=\"#a1887f\"/><stop offset=\"1\" stop-color=\"#4e342e\"/></radialGradient></defs><circle cx=\"16\" cy=\"16\" r=\"14\" fill=\"url(#cgB)\" stroke=\"#222\" stroke-width=\"2.5\"/><path d=\"M2 16 a14 14 0 0 1 28 0\" fill=\"url(#cgA)\" stroke=\"#222\" stroke-width=\"2.5\"/><rect x=\"1\" y=\"13.5\" width=\"30\" height=\"5\" fill=\"#222\"/><path d=\"M18 10 l-5 7 h3.5 l-2.5 7 7-9 h-3.5 l2.5-5 z\" fill=\"#ffd740\" stroke=\"#222\" stroke-width=\"1\"/><path d=\"M5.5 7.5 l2.5 3.5 M26.5 7.5 l-2.5 3.5 M5.5 24.5 l2.5-3.5 M26.5 24.5 l-2.5-3.5\" stroke=\"#000\" stroke-opacity=\".35\" stroke-width=\"1.2\"/></svg>",
+ "theme_css": "/* 星級底色：1★大地綠 → 5★夢幻紫金 */\n.dex-cell.s1 { background:#e8f0e0; }\n.dex-cell.s2 { background:#dbe9f5; }\n.dex-cell.s3 { background:#fdeed2; }\n.dex-cell.s4 { background:#ffe0c7; }\n.dex-cell.s5 { background:#f3e2f7; }\n.dex-cell.s5.got { box-shadow:0 0 10px rgba(168,85,247,.45); }\n.dex-cell.got.s4 { box-shadow:0 0 8px rgba(249,115,22,.35); }\n.dex-cell.got.s3 { box-shadow:0 0 8px rgba(245,158,11,.3); }",
+ "story_file": "story-dino.js",
+ "data": "dino"
+}
